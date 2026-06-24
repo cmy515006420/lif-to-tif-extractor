@@ -1,0 +1,22 @@
+# Microscopy source data and generated images
+*.lif
+*.tif
+*.tiff
+*.png
+*.jpg
+*.jpeg
+
+# Local test/source data folders
+testlif/
+提取出的tif/
+test_output/
+test_exports/
+*_test_output/
+
+# Local dependencies and Python caches
+vendor/
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
