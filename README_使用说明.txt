@@ -2,13 +2,20 @@ LIF 转 TIF 提取器 / LIF to TIFF Extractor
 
 平台 / Platform
 - 仅支持 macOS / macOS only
+- 首次允许后，启动脚本会自动清除本软件文件夹的 macOS 下载隔离标记，减少反复授权弹窗。
+- After the first macOS approval, the launcher automatically removes the quarantine flag from this app folder to avoid repeated prompts.
 - 第一次启动会自动安装 Python 依赖到本机 vendor 文件夹。
 - On first launch, Python dependencies are installed into the local vendor folder.
 
 启动 / Launch
 1. 双击 start_lif_to_tif.command
-2. 点击“打开 LIF / Open LIF”选择 .lif 文件
-3. 点击“选择输出文件夹 / Choose Output Folder”设置导出位置
+2. 如果 macOS 阻止打开，请到“系统设置 > 隐私与安全性”点击“仍要打开 / Open Anyway”，之后脚本会自动清除本文件夹的下载隔离标记。
+3. 点击“打开 LIF / Open LIF”选择 .lif 文件
+4. 点击“选择输出文件夹 / Choose Output Folder”设置导出位置
+
+First Launch on macOS
+- If macOS blocks start_lif_to_tif.command as an unidentified developer, open System Settings > Privacy & Security, click Open Anyway, then confirm Open.
+- After that first approval, the launcher removes the quarantine flag from this app folder so internal files should not need repeated approvals.
 
 主要功能 / Main Features
 - 选择任意 Leica .lif 文件 / Open any Leica .lif file

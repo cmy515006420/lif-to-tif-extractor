@@ -7,16 +7,26 @@ This tool converts Leica `.lif` confocal files into sorted TIFF folders. It curr
 ## 平台 / Platform
 
 - macOS only / 仅支持 macOS
+- 首次允许后，启动脚本会自动清除本软件文件夹的 macOS 下载隔离标记，减少反复授权弹窗。
+- After the first macOS approval, the launcher automatically removes the quarantine flag from this app folder to avoid repeated prompts.
 - 启动脚本会在本机自动准备 Python 依赖到 `vendor/`，该目录不会上传到 GitHub。
 - The launcher installs Python dependencies into the local `vendor/` folder when needed; `vendor/` is not uploaded to GitHub.
 
 ## 使用 / Usage
 
 1. 双击 `start_lif_to_tif.command`
-2. 点击 `打开 LIF / Open LIF`
-3. 设置输出文件夹
-4. 预览并调整每个通道的亮度、对比度
-5. 导出当前图，或批量导出全部
+2. 如果 macOS 阻止打开，请到 `系统设置 > 隐私与安全性` 点击 `仍要打开 / Open Anyway`，之后脚本会自动清除本文件夹的下载隔离标记。
+3. 点击 `打开 LIF / Open LIF`
+4. 设置输出文件夹
+5. 预览并调整每个通道的亮度、对比度
+6. 导出当前图，或批量导出全部
+
+1. Double-click `start_lif_to_tif.command`
+2. If macOS blocks it, go to `System Settings > Privacy & Security` and click `Open Anyway`. After that first approval, the launcher clears the download quarantine flag for this folder.
+3. Click `Open LIF`
+4. Choose an output folder
+5. Preview and adjust channel brightness/contrast
+6. Export the current image or batch export all images
 
 ## 功能 / Features
 
