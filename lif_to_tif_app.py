@@ -42,7 +42,7 @@ FILETIME_EPOCH = datetime(1601, 1, 1, tzinfo=timezone.utc)
 PREVIEW_SIZE = 720
 VIDEO_MAX_SIZE = 1024
 VIDEO_PREVIEW_MAX_FRAMES = 300
-SOFTWARE_VERSION = "0.5.0"
+SOFTWARE_VERSION = "0.5.1"
 PUBLICATION_MODE = "Publication"
 PREVIEW_ONLY_MODE = "Preview"
 NORMALIZATION_ALGORITHM_VERSION = "publication-safe-linear-v1"
@@ -944,6 +944,59 @@ def expected_output_count(
     return total
 
 
+def manifest_fieldnames() -> list[str]:
+    return [
+        "sequence",
+        "lif_file",
+        "lif_index",
+        "series_name",
+        "acquired_at",
+        "kind",
+        "comparison_group",
+        "file_type",
+        "raw_preserved",
+        "display_adjusted",
+        "normalization_mode",
+        "normalization_scope",
+        "algorithm_version",
+        "software_version",
+        "linear_lut",
+        "bit_depth",
+        "raw_min",
+        "raw_max",
+        "black_raw",
+        "white_raw",
+        "low_clipping_percent",
+        "high_clipping_percent",
+        "normalization_warning",
+        "z_index",
+        "t_index",
+        "m_index",
+        "video_fps",
+        "video_speed_source",
+        "video_preview_max_frames",
+        "frame_interval_seconds",
+        "lut",
+        "include_merged",
+        "black",
+        "white",
+        "gamma",
+        "brightness",
+        "contrast",
+        "path",
+    ]
+
+
+def write_failure_log(output_root: Path, error_text: str, prefix: str) -> Path | None:
+    try:
+        output_root.mkdir(parents=True, exist_ok=True)
+        path = output_root / f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        path.write_text(error_text, encoding="utf-8")
+        return path
+    except Exception:
+        return None
+
+
 def export_records(
     lif_path: Path,
     records_with_sequence: Iterable[tuple[int, SeriesRecord]],
@@ -966,7 +1019,19 @@ def export_records(
 ) -> int:
     lif = LifFile(str(lif_path))
     manifest_rows = []
+    fieldnames = manifest_fieldnames()
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    progress_manifest_path = manifest_path.with_name(f"{manifest_path.stem}_progress.csv")
+    progress_file = progress_manifest_path.open("w", newline="", encoding="utf-8-sig")
+    progress_writer = csv.DictWriter(progress_file, fieldnames=fieldnames)
+    progress_writer.writeheader()
+    progress_file.flush()
     written_count = 0
+
+    def add_manifest_row(row: dict[str, str]) -> None:
+        manifest_rows.append(row)
+        progress_writer.writerow(row)
+        progress_file.flush()
 
     for sequence, record in records_with_sequence:
         if cancel_event is not None and cancel_event.is_set():
@@ -1087,7 +1152,7 @@ def export_records(
                 written_count += 1
                 if progress_callback is not None:
                     progress_callback(written_count)
-                manifest_rows.append(
+                add_manifest_row(
                     {
                         "sequence": f"{sequence:03d}",
                         "lif_file": str(lif_path),
@@ -1154,7 +1219,7 @@ def export_records(
                 written_count += 1
                 if progress_callback is not None:
                     progress_callback(written_count)
-                manifest_rows.append(
+                add_manifest_row(
                     {
                         "sequence": f"{sequence:03d}",
                         "lif_file": str(lif_path),
@@ -1210,7 +1275,7 @@ def export_records(
                 written_count += 1
                 if progress_callback is not None:
                     progress_callback(written_count)
-                manifest_rows.append(
+                add_manifest_row(
                     {
                         "sequence": f"{sequence:03d}",
                         "lif_file": str(lif_path),
@@ -1267,7 +1332,7 @@ def export_records(
                     written_count += 1
                     if progress_callback is not None:
                         progress_callback(written_count)
-                    manifest_rows.append(
+                    add_manifest_row(
                         {
                             "sequence": f"{sequence:03d}",
                             "lif_file": str(lif_path),
@@ -1317,7 +1382,7 @@ def export_records(
                 written_count += 1
                 if progress_callback is not None:
                     progress_callback(written_count)
-                manifest_rows.append(
+                add_manifest_row(
                     {
                         "sequence": f"{sequence:03d}",
                         "lif_file": str(lif_path),
@@ -1362,50 +1427,10 @@ def export_records(
                     }
                 )
 
+    progress_file.close()
+
     with manifest_path.open("w", newline="", encoding="utf-8-sig") as csv_file:
-        writer = csv.DictWriter(
-            csv_file,
-            fieldnames=[
-                "sequence",
-                "lif_file",
-                "lif_index",
-                "series_name",
-                "acquired_at",
-                "kind",
-                "comparison_group",
-                "file_type",
-                "raw_preserved",
-                "display_adjusted",
-                "normalization_mode",
-                "normalization_scope",
-                "algorithm_version",
-                "software_version",
-                "linear_lut",
-                "bit_depth",
-                "raw_min",
-                "raw_max",
-                "black_raw",
-                "white_raw",
-                "low_clipping_percent",
-                "high_clipping_percent",
-                "normalization_warning",
-                "z_index",
-                "t_index",
-                "m_index",
-                "video_fps",
-                "video_speed_source",
-                "video_preview_max_frames",
-                "frame_interval_seconds",
-                "lut",
-                "include_merged",
-                "black",
-                "white",
-                "gamma",
-                "brightness",
-                "contrast",
-                "path",
-            ],
-        )
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(manifest_rows)
 
@@ -1417,6 +1442,8 @@ def export_records(
         ),
         "normalization_mode": normalization_mode,
         "principle": "Raw TIFF files are preserved. Display exports use recorded LUT/display ranges.",
+        "manifest": str(manifest_path),
+        "progress_manifest": str(progress_manifest_path),
         "display_rows": [
             {
                 key: row.get(key, "")
@@ -2701,7 +2728,12 @@ class LifToTifApp:
         except ExportCancelled:
             self.worker_queue.put(("cancelled", Path(self.output_var.get()).expanduser().resolve()))
         except Exception:
-            self.worker_queue.put(("error", traceback.format_exc()))
+            error_text = traceback.format_exc()
+            output_root = Path(self.output_var.get()).expanduser().resolve()
+            log_path = write_failure_log(output_root, error_text, "自动调节错误")
+            if log_path is not None:
+                error_text = f"{error_text}\n\nError log saved to: {log_path}"
+            self.worker_queue.put(("error", error_text))
 
     def export_current(self) -> None:
         if self.current_record is None:
@@ -2902,7 +2934,11 @@ class LifToTifApp:
         except ExportCancelled:
             self.worker_queue.put(("cancelled", output_root))
         except Exception:
-            self.worker_queue.put(("error", traceback.format_exc()))
+            error_text = traceback.format_exc()
+            log_path = write_failure_log(output_root, error_text, "导出错误")
+            if log_path is not None:
+                error_text = f"{error_text}\n\nError log saved to: {log_path}"
+            self.worker_queue.put(("error", error_text))
 
     def poll_worker_queue(self) -> None:
         try:

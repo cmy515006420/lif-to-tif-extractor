@@ -84,6 +84,7 @@ The default `Publication` mode does not apply ordinary photo enhancement: no CLA
 - time-lapse 的逐帧 TIFF 文件名包含 `t001`、`t002`...，可在 Fiji/ImageJ 中作为 image sequence 连续查看。
 - GIF/AVI 是预览动态，方便分享和快速检查；正式分析和投稿原始数据请保留 Raw TIFF 与记录表。
 - `提取记录_*.csv` 和 `提取记录_*_normalization.json` 会记录原始文件、comparison group、channel、bit depth、raw min/max、black/white、raw black/white、gamma、是否线性 LUT、clipping 百分比、normalization mode、算法版本、软件版本和输出路径。
+- 导出过程中会同步写入 `提取记录_*_progress.csv`，长任务中断时可用于查看已完成文件；失败时输出文件夹会保存 `导出错误_*.txt`。
 
 - TIFFs under `Raw/` do not apply brightness, contrast, gamma, or color mapping; use them for archiving, review, and quantitative analysis.
 - TIFFs under `C1`, `C2`... and `Merged` are display/layout images using the latest UI adjustments.
@@ -91,6 +92,7 @@ The default `Publication` mode does not apply ordinary photo enhancement: no CLA
 - Time-lapse frame TIFFs are named with `t001`, `t002`... and can be opened as an image sequence in Fiji/ImageJ.
 - GIF/AVI files are preview movies for sharing and quick inspection; keep Raw TIFFs and the manifest for formal analysis and publication records.
 - `提取记录_*.csv` and `提取记录_*_normalization.json` record source file, comparison group, channel, bit depth, raw min/max, black/white, raw black/white, gamma, whether a linear LUT was used, clipping percentages, normalization mode, algorithm version, software version, and output path.
+- During export, `提取记录_*_progress.csv` is written incrementally for long-run recovery; failures also save `导出错误_*.txt` in the output folder.
 
 ## 数据安全 / Data Safety
 
