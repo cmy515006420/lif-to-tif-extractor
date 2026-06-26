@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import queue
 import re
 import subprocess
@@ -40,6 +41,13 @@ except Exception:
 FILETIME_EPOCH = datetime(1601, 1, 1, tzinfo=timezone.utc)
 PREVIEW_SIZE = 720
 VIDEO_MAX_SIZE = 1024
+VIDEO_PREVIEW_MAX_FRAMES = 300
+SOFTWARE_VERSION = "0.5.0"
+PUBLICATION_MODE = "Publication"
+PREVIEW_ONLY_MODE = "Preview"
+NORMALIZATION_ALGORITHM_VERSION = "publication-safe-linear-v1"
+PREVIEW_ALGORITHM_VERSION = "preview-only-linear-v1"
+DEFAULT_GROUP_NAME = "Group 1"
 
 LUT_RGB = {
     "red": (1.0, 0.0, 0.0),
@@ -90,9 +98,17 @@ STRINGS = {
         "auto_settings": "自动调节参数",
         "low_percentile": "背景百分位",
         "high_percentile": "信号百分位",
-        "target_max": "目标亮度",
         "auto_video_speed": "自动视频速度",
         "video_fps": "视频 FPS",
+        "publication_tools": "发表安全显示",
+        "normalization_mode": "模式",
+        "publication_mode": "Publication",
+        "preview_only_mode": "Preview",
+        "comparison_group": "比较组",
+        "set_group": "设置",
+        "apply_to_group": "应用当前参数到同组",
+        "clipping_overlay": "显示 clipping",
+        "lock_bw": "锁定黑/白",
         "merged": "Merged",
         "channel_adjustments": "通道调整",
         "include_merged": "参与 Merged",
@@ -139,6 +155,8 @@ STRINGS = {
         "all_reset": "全部参数已重置",
         "auto_current_done": "当前图已自动调节",
         "auto_all_done": "全部图已自动调节: {count} 个 series",
+        "group_set": "当前图已加入比较组: {group}",
+        "group_applied": "当前参数已应用到同组: {group}",
         "auto_running": "正在自动调节全部图...",
         "cancelling": "正在取消，等待当前文件写完...",
         "current_image": "当前图",
@@ -178,9 +196,17 @@ STRINGS = {
         "auto_settings": "Auto Adjustment Settings",
         "low_percentile": "Background %",
         "high_percentile": "Signal %",
-        "target_max": "Target Max",
         "auto_video_speed": "Auto video speed",
         "video_fps": "Video FPS",
+        "publication_tools": "Publication Display",
+        "normalization_mode": "Mode",
+        "publication_mode": "Publication",
+        "preview_only_mode": "Preview",
+        "comparison_group": "Group",
+        "set_group": "Set",
+        "apply_to_group": "Apply Current to Group",
+        "clipping_overlay": "Show clipping",
+        "lock_bw": "Lock B/W",
         "merged": "Merged",
         "channel_adjustments": "Channel Adjustments",
         "include_merged": "Include in Merged",
@@ -227,6 +253,8 @@ STRINGS = {
         "all_reset": "All settings reset",
         "auto_current_done": "Current image auto-adjusted",
         "auto_all_done": "All images auto-adjusted: {count} series",
+        "group_set": "Current image assigned to group: {group}",
+        "group_applied": "Current settings applied to group: {group}",
         "auto_running": "Auto-adjusting all images...",
         "cancelling": "Cancelling after the current file finishes...",
         "current_image": "current image",
@@ -340,6 +368,37 @@ def rgb_for_lut(lut_name: str) -> tuple[float, float, float]:
     return LUT_RGB.get(lut_name.strip().lower(), (1.0, 1.0, 1.0))
 
 
+def normalize_to_255_float(array: np.ndarray) -> np.ndarray:
+    array = np.asarray(array)
+    if array.dtype == np.uint8:
+        display = array.astype(np.float32)
+    elif np.issubdtype(array.dtype, np.integer):
+        max_value = np.iinfo(array.dtype).max
+        display = (array.astype(np.float32) / max_value) * 255.0 if max_value > 0 else np.zeros_like(array, dtype=np.float32)
+    else:
+        display = array.astype(np.float32)
+    return np.nan_to_num(display, nan=0.0, posinf=255.0, neginf=0.0).astype(np.float32)
+
+
+def apply_display_curve(
+    display: np.ndarray,
+    brightness: float = 1.0,
+    contrast: float = 1.0,
+    gamma: float = 1.0,
+    black: float = 0.0,
+    white: float = 255.0,
+) -> np.ndarray:
+    display = np.asarray(display, dtype=np.float32)
+    black = max(0.0, min(254.0, float(black)))
+    white = max(black + 1.0, min(255.0, float(white)))
+    display = np.clip((display - black) * (255.0 / (white - black)), 0, 255)
+    gamma = max(0.05, float(gamma))
+    if abs(gamma - 1.0) > 0.001:
+        display = np.power(display / 255.0, 1.0 / gamma) * 255.0
+    display = (display - 127.5) * contrast + 127.5
+    return np.clip(display * brightness, 0, 255)
+
+
 def to_uint8_display(
     array: np.ndarray,
     brightness: float = 1.0,
@@ -348,22 +407,8 @@ def to_uint8_display(
     black: float = 0.0,
     white: float = 255.0,
 ) -> np.ndarray:
-    array = np.asarray(array)
-    if array.dtype == np.uint8:
-        display = array.astype(np.float32)
-    elif np.issubdtype(array.dtype, np.integer):
-        max_value = np.iinfo(array.dtype).max
-        display = (array.astype(np.float32) / max_value) * 255.0 if max_value > 0 else 0.0
-    else:
-        display = array.astype(np.float32)
-    black = max(0.0, min(254.0, float(black)))
-    white = max(black + 1.0, min(255.0, float(white)))
-    display = np.clip((display - black) * (255.0 / (white - black)), 0, 255)
-    gamma = max(0.05, float(gamma))
-    if abs(gamma - 1.0) > 0.001:
-        display = np.power(display / 255.0, 1.0 / gamma) * 255.0
-    display = (display - 127.5) * contrast + 127.5
-    return np.clip(display * brightness, 0, 255).astype(np.uint8)
+    display = normalize_to_255_float(array)
+    return apply_display_curve(display, brightness, contrast, gamma, black, white).astype(np.uint8)
 
 
 def colorize(
@@ -392,6 +437,17 @@ def merge_colored(channels: list[np.ndarray], mode: str) -> np.ndarray | None:
     for channel in channels:
         merged = np.maximum(merged, channel)
     return merged
+
+
+def apply_clipping_overlay(rgb: np.ndarray, low_mask: np.ndarray | None, high_mask: np.ndarray | None) -> np.ndarray:
+    overlaid = np.asarray(rgb).copy()
+    if low_mask is not None:
+        mask = np.asarray(low_mask, dtype=bool)
+        overlaid[mask] = (0, 80, 255)
+    if high_mask is not None:
+        mask = np.asarray(high_mask, dtype=bool)
+        overlaid[mask] = (255, 40, 40)
+    return overlaid
 
 
 def write_tiff(path: Path, array: np.ndarray) -> None:
@@ -443,6 +499,40 @@ def write_avi(path: Path, frames: list[Image.Image], fps: float) -> bool:
             pass
         return False
     return True
+
+
+def open_avi_writer(path: Path, fps: float):
+    if imageio is None or imageio_ffmpeg is None:
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        return imageio.get_writer(
+            str(path),
+            fps=max(0.5, float(fps)),
+            codec="mjpeg",
+            quality=9,
+            macro_block_size=None,
+        )
+    except Exception:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+
+
+def close_avi_writer(writer, path: Path) -> bool:
+    if writer is None:
+        return False
+    try:
+        writer.close()
+    except Exception:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+    return path.exists() and path.stat().st_size > 0
 
 
 def clamp_float(value: float, low: float, high: float) -> float:
@@ -506,6 +596,13 @@ def iter_planes(image):
                 yield z, t, m
 
 
+def should_keep_video_preview_frame(frame_index: int, frame_count: int) -> bool:
+    if frame_count <= VIDEO_PREVIEW_MAX_FRAMES:
+        return True
+    step = int(np.ceil(frame_count / VIDEO_PREVIEW_MAX_FRAMES))
+    return frame_index % step == 0 or frame_index == frame_count - 1
+
+
 def make_preview_plane_array(image, channel: int, z: int = 0, t: int = 0, m: int = 0) -> np.ndarray:
     requested = requested_dims_for(image, z, t, m)
     plane = image.get_plane(c=channel, requested_dims=requested)
@@ -513,17 +610,286 @@ def make_preview_plane_array(image, channel: int, z: int = 0, t: int = 0, m: int
     return np.asarray(plane)
 
 
-def compute_auto_parameters(plane: np.ndarray, low_percent: float, high_percent: float, target: float) -> tuple[float, float, float]:
-    base = to_uint8_display(plane, 1.0, 1.0, 1.0, 0.0, 255.0).astype(np.float32)
-    low_percent = max(0.0, min(99.0, float(low_percent)))
-    high_percent = max(low_percent + 0.1, min(100.0, float(high_percent)))
-    target = max(1.0, min(255.0, float(target)))
-    black = float(np.percentile(base, low_percent))
-    white = float(np.percentile(base, high_percent))
-    if white <= black + 1.0:
-        white = min(255.0, black + 1.0)
-    brightness = target / 255.0
-    return black, white, brightness
+def dtype_max_for_array(array: np.ndarray) -> float:
+    array = np.asarray(array)
+    if np.issubdtype(array.dtype, np.integer):
+        return float(np.iinfo(array.dtype).max)
+    finite = array[np.isfinite(array)]
+    return float(np.max(finite)) if finite.size else 255.0
+
+
+def bit_depth_for_array(array: np.ndarray) -> int:
+    array = np.asarray(array)
+    if np.issubdtype(array.dtype, np.integer):
+        return int(np.iinfo(array.dtype).bits)
+    return 32
+
+
+def raw_to_display_point(value: float, dtype_max: float) -> float:
+    return clamp_float((float(value) / max(1.0, dtype_max)) * 255.0, 0.0, 255.0)
+
+
+def display_to_raw_point(value: float, dtype_max: float) -> float:
+    return clamp_float(float(value), 0.0, 255.0) * max(1.0, dtype_max) / 255.0
+
+
+def sampled_values_from_array(array: np.ndarray, max_pixels: int = 160_000) -> np.ndarray:
+    values = np.asarray(array).ravel()
+    if values.size > max_pixels:
+        step = int(np.ceil(values.size / max_pixels))
+        values = values[::step][:max_pixels]
+    return values.astype(np.float64, copy=False)
+
+
+def sampled_channel_values(image, channel: int, max_pixels: int = 160_000) -> tuple[np.ndarray, int, float, float]:
+    samples = []
+    raw_min = float("inf")
+    raw_max = float("-inf")
+    bit_depth = 16
+    plane_count = max(1, int(image.dims.z) * int(image.dims.t) * int(image.dims.m))
+    per_plane_limit = max(2048, max_pixels // plane_count)
+    for z, t, m in iter_planes(image):
+        plane = np.asarray(image.get_plane(c=channel, requested_dims=requested_dims_for(image, z, t, m)))
+        bit_depth = bit_depth_for_array(plane)
+        if plane.size:
+            raw_min = min(raw_min, float(np.min(plane)))
+            raw_max = max(raw_max, float(np.max(plane)))
+            samples.append(sampled_values_from_array(plane, per_plane_limit))
+    if not samples:
+        return np.asarray([0.0], dtype=np.float64), bit_depth, 0.0, 0.0
+    return np.concatenate(samples), bit_depth, raw_min, raw_max
+
+
+def compute_publication_range_from_values(
+    values: np.ndarray,
+    bit_depth: int,
+    raw_min: float | None = None,
+    raw_max: float | None = None,
+    low_clip_percent: float = 0.1,
+    high_clip_percent: float = 0.05,
+) -> dict[str, float | str]:
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        finite = np.asarray([0.0], dtype=np.float64)
+    dtype_max = float((2**bit_depth) - 1) if bit_depth > 0 and bit_depth <= 32 else max(255.0, float(np.max(finite)))
+    raw_min_value = float(np.min(finite) if raw_min is None else raw_min)
+    raw_max_value = float(np.max(finite) if raw_max is None else raw_max)
+    low_clip_percent = clamp_float(low_clip_percent, 0.0, 0.5)
+    high_clip_percent = clamp_float(high_clip_percent, 0.01, 0.1)
+
+    lower_values = finite[finite <= np.percentile(finite, 75.0)]
+    if lower_values.size < max(32, int(finite.size * 0.05)):
+        lower_values = finite
+    background_median = float(np.median(lower_values))
+    mad = float(np.median(np.abs(lower_values - background_median)))
+    noise_sigma = max(1.0, 1.4826 * mad)
+    signal_threshold = background_median + max(3.0 * noise_sigma, dtype_max / 4096.0)
+    foreground = finite[finite > signal_threshold]
+    foreground_fraction = float(foreground.size / finite.size)
+
+    black_raw = float(np.percentile(finite, low_clip_percent))
+    black_raw = max(0.0, black_raw - max(2.0 * noise_sigma, dtype_max / 65535.0))
+    white_percentile = 100.0 - high_clip_percent
+    white_raw = float(np.percentile(finite, white_percentile))
+    near_max_raw = float(np.percentile(finite, 99.99))
+    reliable_signal = foreground.size >= max(16, int(finite.size * 0.001)) and raw_max_value > background_median + 8.0 * noise_sigma
+    if reliable_signal:
+        foreground_high = float(np.percentile(foreground, 99.0))
+        white_raw = max(white_raw, foreground_high)
+    else:
+        white_raw = max(white_raw, background_median + 64.0 * noise_sigma, dtype_max * 0.02)
+    white_raw += max(2.0 * noise_sigma, (white_raw - black_raw) * 0.01, 1.0)
+
+    warning_parts = []
+    if not reliable_signal:
+        warning_parts.append("low signal / auto contrast not reliable")
+    if white_raw <= black_raw + 1.0:
+        white_raw = black_raw + max(1.0, 16.0 * noise_sigma)
+        warning_parts.append("very low dynamic range")
+    white_raw = clamp_float(white_raw, black_raw + 1.0, dtype_max)
+    black_raw = clamp_float(black_raw, 0.0, white_raw - 1.0)
+
+    low_clipping = float(np.mean(finite <= black_raw) * 100.0)
+    high_clipping = float(np.mean(finite >= white_raw) * 100.0)
+    if high_clipping > 0.1:
+        warning_parts.append("high clipping above 0.1%")
+    if low_clipping > 0.5:
+        warning_parts.append("low clipping above 0.5%")
+
+    return {
+        "black": round(raw_to_display_point(black_raw, dtype_max), 1),
+        "white": round(raw_to_display_point(white_raw, dtype_max), 1),
+        "brightness": 1.0,
+        "contrast": 1.0,
+        "gamma": 1.0,
+        "bit_depth": float(bit_depth),
+        "raw_min": raw_min_value,
+        "raw_max": raw_max_value,
+        "black_raw": black_raw,
+        "white_raw": white_raw,
+        "low_clipping_percent": low_clipping,
+        "high_clipping_percent": high_clipping,
+        "foreground_fraction": foreground_fraction,
+        "warning": "; ".join(dict.fromkeys(warning_parts)),
+    }
+
+
+def compute_auto_parameters(plane: np.ndarray, low_percent: float, high_percent: float) -> tuple[float, float, float, float, float]:
+    bit_depth = bit_depth_for_array(plane)
+    values = sampled_values_from_array(plane)
+    high_clip_percent = clamp_float(100.0 - float(high_percent), 0.01, 0.1)
+    stats = compute_publication_range_from_values(
+        values,
+        bit_depth,
+        raw_min=float(np.min(plane)) if np.asarray(plane).size else 0.0,
+        raw_max=float(np.max(plane)) if np.asarray(plane).size else 0.0,
+        low_clip_percent=low_percent,
+        high_clip_percent=high_clip_percent,
+    )
+    return (
+        float(stats["black"]),
+        float(stats["white"]),
+        1.0,
+        1.0,
+        1.0,
+    )
+
+
+def clipping_stats_for_plane(array: np.ndarray, black: float, white: float) -> dict[str, float | int]:
+    array = np.asarray(array)
+    dtype_max = dtype_max_for_array(array)
+    display = normalize_to_255_float(array)
+    return {
+        "bit_depth": bit_depth_for_array(array),
+        "raw_min": float(np.min(array)) if array.size else 0.0,
+        "raw_max": float(np.max(array)) if array.size else 0.0,
+        "black_raw": display_to_raw_point(black, dtype_max),
+        "white_raw": display_to_raw_point(white, dtype_max),
+        "low_clipping_percent": float(np.mean(display <= black) * 100.0) if display.size else 0.0,
+        "high_clipping_percent": float(np.mean(display >= white) * 100.0) if display.size else 0.0,
+    }
+
+
+def warning_for_display_stats(stats: dict[str, float | int]) -> str:
+    warnings = []
+    if float(stats.get("high_clipping_percent", 0.0)) > 0.1:
+        warnings.append("high clipping above 0.1%")
+    if float(stats.get("low_clipping_percent", 0.0)) > 0.5:
+        warnings.append("low clipping above 0.5%")
+    if float(stats.get("raw_max", 0.0)) <= float(stats.get("raw_min", 0.0)) + 1.0:
+        warnings.append("low signal / auto contrast not reliable")
+    return "; ".join(warnings)
+
+
+def compute_publication_settings_for_records(
+    lif: LifFile,
+    records: list[SeriesRecord],
+    group_by_index: dict[int, str],
+    low_clip_percent: float,
+    high_percentile: float,
+    existing_black: dict[int, list[float]] | None = None,
+    existing_white: dict[int, list[float]] | None = None,
+    locked_by_index: dict[int, list[bool]] | None = None,
+    existing_include: dict[int, list[bool]] | None = None,
+    existing_lut: dict[int, list[str]] | None = None,
+    cancel_event: threading.Event | None = None,
+    progress_callback=None,
+) -> dict[str, dict[int, list]]:
+    result = {
+        "brightness": {},
+        "contrast": {},
+        "gamma": {},
+        "black": {},
+        "white": {},
+        "include": {},
+        "lut": {},
+    }
+    records_by_group: dict[str, list[SeriesRecord]] = {}
+    for record in records:
+        records_by_group.setdefault(group_by_index.get(record.lif_index, DEFAULT_GROUP_NAME), []).append(record)
+
+    processed = 0
+    high_clip_percent = clamp_float(100.0 - float(high_percentile), 0.01, 0.1)
+    for group_records in records_by_group.values():
+        max_channels = max(max(1, len(record.channel_luts)) for record in group_records)
+        channel_stats = []
+        for channel in range(max_channels):
+            if cancel_event is not None and cancel_event.is_set():
+                raise ExportCancelled()
+            samples = []
+            bit_depth = 0
+            raw_min = float("inf")
+            raw_max = float("-inf")
+            per_record_limit = max(4096, 220_000 // max(1, len(group_records)))
+            for record in group_records:
+                image = lif.get_image(record.lif_index)
+                if channel >= int(image.channels):
+                    continue
+                values, plane_bit_depth, plane_min, plane_max = sampled_channel_values(
+                    image, channel, max_pixels=per_record_limit
+                )
+                samples.append(values)
+                bit_depth = max(bit_depth, plane_bit_depth)
+                raw_min = min(raw_min, plane_min)
+                raw_max = max(raw_max, plane_max)
+            if samples:
+                if bit_depth <= 0:
+                    bit_depth = 16
+                combined = np.concatenate(samples)
+                stats = compute_publication_range_from_values(
+                    combined,
+                    bit_depth,
+                    raw_min=raw_min,
+                    raw_max=raw_max,
+                    low_clip_percent=low_clip_percent,
+                    high_clip_percent=high_clip_percent,
+                )
+            else:
+                stats = {
+                    "black": 0.0,
+                    "white": 255.0,
+                    "brightness": 1.0,
+                    "contrast": 1.0,
+                    "gamma": 1.0,
+                }
+            channel_stats.append(stats)
+
+        for record in group_records:
+            channels = max(1, len(record.channel_luts))
+            locks = (locked_by_index or {}).get(record.lif_index, [False] * channels)
+            old_black = (existing_black or {}).get(record.lif_index, [])
+            old_white = (existing_white or {}).get(record.lif_index, [])
+            black_values = []
+            white_values = []
+            for channel in range(channels):
+                stats = channel_stats[channel] if channel < len(channel_stats) else {"black": 0.0, "white": 255.0}
+                if channel < len(locks) and locks[channel] and channel < len(old_black) and channel < len(old_white):
+                    black_values.append(float(old_black[channel]))
+                    white_values.append(float(old_white[channel]))
+                else:
+                    black_values.append(float(stats["black"]))
+                    white_values.append(float(stats["white"]))
+            result["black"][record.lif_index] = black_values
+            result["white"][record.lif_index] = white_values
+            result["brightness"][record.lif_index] = [1.0] * channels
+            result["contrast"][record.lif_index] = [1.0] * channels
+            result["gamma"][record.lif_index] = [1.0] * channels
+            result["include"][record.lif_index] = (existing_include or {}).get(record.lif_index, [True] * channels)[
+                :channels
+            ]
+            while len(result["include"][record.lif_index]) < channels:
+                result["include"][record.lif_index].append(True)
+            result["lut"][record.lif_index] = (existing_lut or {}).get(record.lif_index, list(record.channel_luts))[
+                :channels
+            ]
+            while len(result["lut"][record.lif_index]) < channels:
+                idx = len(result["lut"][record.lif_index])
+                result["lut"][record.lif_index].append(record.channel_luts[idx] if idx < len(record.channel_luts) else "Gray")
+            processed += 1
+            if progress_callback is not None:
+                progress_callback(processed)
+    return result
 
 
 def discover_records(lif: LifFile) -> list[SeriesRecord]:
@@ -593,6 +959,8 @@ def export_records(
     apply_adjustments: bool,
     merge_mode: str = "Max",
     manual_video_fps: float | None = None,
+    normalization_mode: str = PUBLICATION_MODE,
+    group_by_index: dict[int, str] | None = None,
     progress_callback=None,
     cancel_event: threading.Event | None = None,
 ) -> int:
@@ -611,6 +979,11 @@ def export_records(
         white = white_by_index.get(record.lif_index, [255.0] * image.channels)
         include_merged = include_merged_by_index.get(record.lif_index, [True] * image.channels)
         lut_values = lut_by_index.get(record.lif_index, list(record.channel_luts))
+        group_name = (group_by_index or {}).get(record.lif_index, DEFAULT_GROUP_NAME)
+        algorithm_version = (
+            NORMALIZATION_ALGORITHM_VERSION if normalization_mode == PUBLICATION_MODE else PREVIEW_ALGORITHM_VERSION
+        )
+        normalization_scope = "group_stack_channel" if normalization_mode == PUBLICATION_MODE else "preview_only_per_image"
         date_folder = record.acquired_at.strftime("%Y%m%d") if record.acquired_at else "unknown_time"
         time_label = record.acquired_at.strftime("%H%M%S") if record.acquired_at else "unknown"
         datetime_label = record.acquired_at.strftime("%Y%m%d_%H%M%S") if record.acquired_at else "unknown_time"
@@ -623,6 +996,63 @@ def export_records(
         )
         frame_duration_ms = max(20, int(round(1000.0 / max(0.1, record_video_fps))))
         video_frames: dict[tuple[str, int, int], list[Image.Image]] = {}
+        video_linear_lut: dict[tuple[str, int, int], str] = {}
+        avi_writers = {}
+        avi_paths: dict[tuple[str, int, int], Path] = {}
+        avi_success: set[tuple[str, int, int]] = set()
+        avi_failed: set[tuple[str, int, int]] = set()
+
+        def video_path_for(kind: str, z: int, m: int, extension: str) -> Path:
+            suffix = video_suffix(image, z, m)
+            kind_slug = kind.lower() if kind != "Merged" else "merged"
+            filename = f"{datetime_label}_{safe_name(record.name)}-{kind_slug}_timelapse{suffix}.{extension}"
+            return series_folder / kind / filename
+
+        def add_video_frame(kind: str, z: int, t: int, m: int, frame_source: np.ndarray) -> None:
+            video_key = (kind, z, m)
+            frame = video_frame_from_array(frame_source)
+            if imageio is not None and imageio_ffmpeg is not None and video_key not in avi_failed:
+                writer = avi_writers.get(video_key)
+                if writer is None and video_key not in avi_writers:
+                    avi_path = video_path_for(kind, z, m, "avi")
+                    writer = open_avi_writer(avi_path, record_video_fps)
+                    if writer is None:
+                        avi_failed.add(video_key)
+                    else:
+                        avi_writers[video_key] = writer
+                        avi_paths[video_key] = avi_path
+                writer = avi_writers.get(video_key)
+                if writer is not None:
+                    try:
+                        writer.append_data(np.asarray(frame.convert("RGB")))
+                    except Exception:
+                        avi_failed.add(video_key)
+                        try:
+                            writer.close()
+                        except Exception:
+                            pass
+                        avi_writers.pop(video_key, None)
+                        failed_path = avi_paths.pop(video_key, None)
+                        if failed_path is not None:
+                            try:
+                                failed_path.unlink(missing_ok=True)
+                            except OSError:
+                                pass
+            if should_keep_video_preview_frame(t, int(image.dims.t)):
+                video_frames.setdefault(video_key, []).append(frame)
+
+        def close_all_avi_writers(remove: bool = False) -> None:
+            for video_key, writer in list(avi_writers.items()):
+                path = avi_paths.get(video_key)
+                ok = close_avi_writer(writer, path) if path is not None else False
+                if ok and not remove:
+                    avi_success.add(video_key)
+                elif path is not None:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            avi_writers.clear()
 
         for z, t, m in iter_planes(image):
             suffix = plane_suffix(image, z, t, m)
@@ -631,6 +1061,7 @@ def export_records(
 
             for channel_index in range(image.channels):
                 if cancel_event is not None and cancel_event.is_set():
+                    close_all_avi_writers(remove=True)
                     raise ExportCancelled()
                 original_lut = record.channel_luts[channel_index] if channel_index < len(record.channel_luts) else "Gray"
                 lut_name = lut_values[channel_index] if apply_adjustments and channel_index < len(lut_values) else original_lut
@@ -643,6 +1074,12 @@ def export_records(
                     include_merged[channel_index] if apply_adjustments and channel_index < len(include_merged) else True
                 )
                 plane = np.asarray(image.get_plane(c=channel_index, requested_dims=requested))
+                display_stats = clipping_stats_for_plane(plane, channel_black, channel_white)
+                linear_lut = (
+                    abs(channel_brightness - 1.0) < 0.001
+                    and abs(channel_contrast - 1.0) < 0.001
+                    and abs(channel_gamma - 1.0) < 0.001
+                )
                 channel_name = f"C{channel_index + 1}"
                 raw_filename = f"{datetime_label}_{safe_name(record.name)}-raw-c{channel_index + 1}{suffix}.tif"
                 raw_output_path = series_folder / "Raw" / channel_name / raw_filename
@@ -658,9 +1095,23 @@ def export_records(
                         "series_name": record.name,
                         "acquired_at": record.acquired_at.isoformat() if record.acquired_at else "",
                         "kind": f"Raw {channel_name}",
+                        "comparison_group": group_name,
                         "file_type": "raw_tiff",
                         "raw_preserved": "yes",
                         "display_adjusted": "no",
+                        "normalization_mode": "raw",
+                        "normalization_scope": "raw",
+                        "algorithm_version": "",
+                        "software_version": SOFTWARE_VERSION,
+                        "linear_lut": "",
+                        "bit_depth": str(display_stats["bit_depth"]),
+                        "raw_min": f"{display_stats['raw_min']:.6g}",
+                        "raw_max": f"{display_stats['raw_max']:.6g}",
+                        "black_raw": "",
+                        "white_raw": "",
+                        "low_clipping_percent": "",
+                        "high_clipping_percent": "",
+                        "normalization_warning": "",
                         "z_index": str(z + 1),
                         "t_index": str(t + 1),
                         "m_index": str(m + 1),
@@ -693,7 +1144,10 @@ def export_records(
                     merged_channels.append(colored)
 
                 if make_timelapse:
-                    video_frames.setdefault((channel_name, z, m), []).append(video_frame_from_array(colored))
+                    video_key = (channel_name, z, m)
+                    add_video_frame(channel_name, z, t, m, colored)
+                    previous_linear = video_linear_lut.get(video_key, "yes")
+                    video_linear_lut[video_key] = "yes" if previous_linear == "yes" and linear_lut else "no"
                 filename = f"{datetime_label}_{safe_name(record.name)}-c{channel_index + 1}{suffix}.tif"
                 output_path = series_folder / channel_name / filename
                 write_tiff(output_path, colored)
@@ -708,9 +1162,23 @@ def export_records(
                         "series_name": record.name,
                         "acquired_at": record.acquired_at.isoformat() if record.acquired_at else "",
                         "kind": channel_name,
+                        "comparison_group": group_name,
                         "file_type": "display_tiff",
                         "raw_preserved": "no",
                         "display_adjusted": "yes" if apply_adjustments else "no",
+                        "normalization_mode": normalization_mode if apply_adjustments else "raw_display",
+                        "normalization_scope": normalization_scope if apply_adjustments else "raw_display",
+                        "algorithm_version": algorithm_version if apply_adjustments else "",
+                        "software_version": SOFTWARE_VERSION,
+                        "linear_lut": "yes" if linear_lut else "no",
+                        "bit_depth": str(display_stats["bit_depth"]),
+                        "raw_min": f"{display_stats['raw_min']:.6g}",
+                        "raw_max": f"{display_stats['raw_max']:.6g}",
+                        "black_raw": f"{display_stats['black_raw']:.6g}",
+                        "white_raw": f"{display_stats['white_raw']:.6g}",
+                        "low_clipping_percent": f"{display_stats['low_clipping_percent']:.6g}",
+                        "high_clipping_percent": f"{display_stats['high_clipping_percent']:.6g}",
+                        "normalization_warning": warning_for_display_stats(display_stats),
                         "z_index": str(z + 1),
                         "t_index": str(t + 1),
                         "m_index": str(m + 1),
@@ -733,7 +1201,9 @@ def export_records(
             merged = merge_colored(merged_channels, merge_mode)
             if merged is not None:
                 if make_timelapse:
-                    video_frames.setdefault(("Merged", z, m), []).append(video_frame_from_array(merged))
+                    video_key = ("Merged", z, m)
+                    add_video_frame("Merged", z, t, m, merged)
+                    video_linear_lut[video_key] = "per-channel"
                 filename = f"{datetime_label}_{safe_name(record.name)}-merged{suffix}.tif"
                 output_path = series_folder / "Merged" / filename
                 write_tiff(output_path, merged)
@@ -748,9 +1218,23 @@ def export_records(
                         "series_name": record.name,
                         "acquired_at": record.acquired_at.isoformat() if record.acquired_at else "",
                         "kind": "Merged",
+                        "comparison_group": group_name,
                         "file_type": "display_tiff",
                         "raw_preserved": "no",
                         "display_adjusted": "yes" if apply_adjustments else "no",
+                        "normalization_mode": normalization_mode if apply_adjustments else "raw_display",
+                        "normalization_scope": normalization_scope if apply_adjustments else "raw_display",
+                        "algorithm_version": algorithm_version if apply_adjustments else "",
+                        "software_version": SOFTWARE_VERSION,
+                        "linear_lut": "per-channel",
+                        "bit_depth": "",
+                        "raw_min": "",
+                        "raw_max": "",
+                        "black_raw": "per-channel",
+                        "white_raw": "per-channel",
+                        "low_clipping_percent": "see channel rows",
+                        "high_clipping_percent": "see channel rows",
+                        "normalization_warning": "see channel rows",
                         "z_index": str(z + 1),
                         "t_index": str(t + 1),
                         "m_index": str(m + 1),
@@ -771,13 +1255,15 @@ def export_records(
                 )
 
         if make_timelapse:
+            close_all_avi_writers()
             for (kind, z, m), frames in video_frames.items():
                 if cancel_event is not None and cancel_event.is_set():
                     raise ExportCancelled()
                 suffix = video_suffix(image, z, m)
                 kind_slug = kind.lower() if kind != "Merged" else "merged"
-                avi_path = series_folder / kind / f"{datetime_label}_{safe_name(record.name)}-{kind_slug}_timelapse{suffix}.avi"
-                if write_avi(avi_path, frames, record_video_fps):
+                video_linear = video_linear_lut.get((kind, z, m), "per-channel" if kind == "Merged" else "yes")
+                avi_path = video_path_for(kind, z, m, "avi")
+                if (kind, z, m) in avi_success:
                     written_count += 1
                     if progress_callback is not None:
                         progress_callback(written_count)
@@ -789,14 +1275,29 @@ def export_records(
                             "series_name": record.name,
                             "acquired_at": record.acquired_at.isoformat() if record.acquired_at else "",
                             "kind": f"{kind} time-lapse AVI",
+                            "comparison_group": group_name,
                             "file_type": "preview_avi",
                             "raw_preserved": "no",
                             "display_adjusted": "yes" if apply_adjustments else "no",
+                            "normalization_mode": normalization_mode if apply_adjustments else "raw_display",
+                            "normalization_scope": normalization_scope if apply_adjustments else "raw_display",
+                            "algorithm_version": algorithm_version if apply_adjustments else "",
+                            "software_version": SOFTWARE_VERSION,
+                            "linear_lut": video_linear,
+                            "bit_depth": "",
+                            "raw_min": "",
+                            "raw_max": "",
+                            "black_raw": "see frame TIFF rows",
+                            "white_raw": "see frame TIFF rows",
+                            "low_clipping_percent": "see frame TIFF rows",
+                            "high_clipping_percent": "see frame TIFF rows",
+                            "normalization_warning": "see frame TIFF rows",
                             "z_index": str(z + 1),
                             "t_index": "all",
                             "m_index": str(m + 1),
                             "video_fps": f"{record_video_fps:.2f}",
                             "video_speed_source": video_speed_source,
+                            "video_preview_max_frames": str(VIDEO_PREVIEW_MAX_FRAMES),
                             "frame_interval_seconds": (
                                 f"{record.frame_interval_seconds:.6g}" if record.frame_interval_seconds is not None else ""
                             ),
@@ -811,8 +1312,7 @@ def export_records(
                         }
                     )
 
-                filename = f"{datetime_label}_{safe_name(record.name)}-{kind_slug}_timelapse{suffix}.gif"
-                output_path = series_folder / kind / filename
+                output_path = video_path_for(kind, z, m, "gif")
                 write_gif(output_path, frames, frame_duration_ms)
                 written_count += 1
                 if progress_callback is not None:
@@ -825,14 +1325,29 @@ def export_records(
                         "series_name": record.name,
                         "acquired_at": record.acquired_at.isoformat() if record.acquired_at else "",
                         "kind": f"{kind} time-lapse GIF",
+                        "comparison_group": group_name,
                         "file_type": "preview_gif",
                         "raw_preserved": "no",
                         "display_adjusted": "yes" if apply_adjustments else "no",
+                        "normalization_mode": normalization_mode if apply_adjustments else "raw_display",
+                        "normalization_scope": normalization_scope if apply_adjustments else "raw_display",
+                        "algorithm_version": algorithm_version if apply_adjustments else "",
+                        "software_version": SOFTWARE_VERSION,
+                        "linear_lut": video_linear,
+                        "bit_depth": "",
+                        "raw_min": "",
+                        "raw_max": "",
+                        "black_raw": "see frame TIFF rows",
+                        "white_raw": "see frame TIFF rows",
+                        "low_clipping_percent": "see frame TIFF rows",
+                        "high_clipping_percent": "see frame TIFF rows",
+                        "normalization_warning": "see frame TIFF rows",
                         "z_index": str(z + 1),
                         "t_index": "all",
                         "m_index": str(m + 1),
                         "video_fps": f"{record_video_fps:.2f}",
                         "video_speed_source": video_speed_source,
+                        "video_preview_max_frames": str(VIDEO_PREVIEW_MAX_FRAMES),
                         "frame_interval_seconds": (
                             f"{record.frame_interval_seconds:.6g}" if record.frame_interval_seconds is not None else ""
                         ),
@@ -857,14 +1372,29 @@ def export_records(
                 "series_name",
                 "acquired_at",
                 "kind",
+                "comparison_group",
                 "file_type",
                 "raw_preserved",
                 "display_adjusted",
+                "normalization_mode",
+                "normalization_scope",
+                "algorithm_version",
+                "software_version",
+                "linear_lut",
+                "bit_depth",
+                "raw_min",
+                "raw_max",
+                "black_raw",
+                "white_raw",
+                "low_clipping_percent",
+                "high_clipping_percent",
+                "normalization_warning",
                 "z_index",
                 "t_index",
                 "m_index",
                 "video_fps",
                 "video_speed_source",
+                "video_preview_max_frames",
                 "frame_interval_seconds",
                 "lut",
                 "include_merged",
@@ -879,6 +1409,53 @@ def export_records(
         writer.writeheader()
         writer.writerows(manifest_rows)
 
+    normalization_log_path = manifest_path.with_name(f"{manifest_path.stem}_normalization.json")
+    normalization_log = {
+        "software_version": SOFTWARE_VERSION,
+        "algorithm_version": (
+            NORMALIZATION_ALGORITHM_VERSION if normalization_mode == PUBLICATION_MODE else PREVIEW_ALGORITHM_VERSION
+        ),
+        "normalization_mode": normalization_mode,
+        "principle": "Raw TIFF files are preserved. Display exports use recorded LUT/display ranges.",
+        "display_rows": [
+            {
+                key: row.get(key, "")
+                for key in (
+                    "sequence",
+                    "lif_file",
+                    "lif_index",
+                    "series_name",
+                    "kind",
+                    "comparison_group",
+                    "file_type",
+                    "normalization_mode",
+                    "normalization_scope",
+                    "linear_lut",
+                    "bit_depth",
+                    "raw_min",
+                    "raw_max",
+                    "black",
+                    "white",
+                    "black_raw",
+                    "white_raw",
+                    "gamma",
+                    "brightness",
+                    "contrast",
+                    "low_clipping_percent",
+                    "high_clipping_percent",
+                    "normalization_warning",
+                    "path",
+                )
+            }
+            for row in manifest_rows
+            if row.get("file_type") != "raw_tiff"
+        ],
+    }
+    normalization_log_path.write_text(
+        json.dumps(normalization_log, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
     return len(manifest_rows)
 
 
@@ -889,9 +1466,11 @@ class LifToTifApp:
         self.lang_var = tk.StringVar(value="中文")
         self.preview_mode_var = tk.StringVar(value="Merged")
         self.merge_mode_var = tk.StringVar(value="Max")
-        self.auto_low_var = tk.DoubleVar(value=0.5)
-        self.auto_high_var = tk.DoubleVar(value=99.8)
-        self.auto_target_var = tk.DoubleVar(value=230.0)
+        self.normalization_mode_var = tk.StringVar(value=PUBLICATION_MODE)
+        self.group_var = tk.StringVar(value=DEFAULT_GROUP_NAME)
+        self.clipping_overlay_var = tk.BooleanVar(value=False)
+        self.auto_low_var = tk.DoubleVar(value=0.1)
+        self.auto_high_var = tk.DoubleVar(value=99.95)
         self.auto_video_speed_var = tk.BooleanVar(value=True)
         self.video_fps_var = tk.DoubleVar(value=5.0)
         self.root.title(self.t("app_title"))
@@ -912,8 +1491,10 @@ class LifToTifApp:
         self.gamma_by_index: dict[int, list[float]] = {}
         self.black_by_index: dict[int, list[float]] = {}
         self.white_by_index: dict[int, list[float]] = {}
+        self.bw_locked_by_index: dict[int, list[bool]] = {}
         self.include_merged_by_index: dict[int, list[bool]] = {}
         self.lut_by_index: dict[int, list[str]] = {}
+        self.group_by_index: dict[int, str] = {}
         self.preview_photo = None
         self.worker_queue: queue.Queue = queue.Queue()
         self.export_cancel_event: threading.Event | None = None
@@ -930,6 +1511,7 @@ class LifToTifApp:
         self.lut_vars: list[tk.StringVar] = []
         self.black_vars: list[tk.DoubleVar] = []
         self.white_vars: list[tk.DoubleVar] = []
+        self.bw_lock_vars: list[tk.BooleanVar] = []
         self.gamma_vars: list[tk.DoubleVar] = []
         self.brightness_vars: list[tk.DoubleVar] = []
         self.contrast_vars: list[tk.DoubleVar] = []
@@ -1073,6 +1655,33 @@ class LifToTifApp:
         self.info_var = tk.StringVar(value="")
         ttk.Label(controls_wrap, textvariable=self.info_var).pack(fill=tk.X, pady=(0, 6))
 
+        publication_box = ttk.LabelFrame(controls_wrap, text=self.t("publication_tools"), padding=(8, 4))
+        publication_box.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(publication_box, text=self.t("normalization_mode")).grid(row=0, column=0, sticky=tk.W, padx=(0, 6), pady=2)
+        mode_combo = ttk.Combobox(
+            publication_box,
+            textvariable=self.normalization_mode_var,
+            values=(PUBLICATION_MODE, PREVIEW_ONLY_MODE),
+            width=12,
+            state="readonly",
+        )
+        mode_combo.grid(row=0, column=1, sticky=tk.W, pady=2)
+        mode_combo.bind("<<ComboboxSelected>>", lambda _event=None: self.on_normalization_mode_changed())
+        ttk.Label(publication_box, text=self.t("comparison_group")).grid(row=1, column=0, sticky=tk.W, padx=(0, 6), pady=2)
+        ttk.Entry(publication_box, textvariable=self.group_var, width=12).grid(row=1, column=1, sticky=tk.W, pady=2)
+        ttk.Button(publication_box, text=self.t("set_group"), command=self.set_current_group).grid(
+            row=1, column=2, sticky=tk.W, padx=(6, 0), pady=2
+        )
+        ttk.Button(publication_box, text=self.t("apply_to_group"), command=self.apply_current_settings_to_group).grid(
+            row=2, column=0, columnspan=3, sticky=tk.EW, pady=(4, 2)
+        )
+        ttk.Checkbutton(
+            publication_box,
+            text=self.t("clipping_overlay"),
+            variable=self.clipping_overlay_var,
+            command=self.render_preview,
+        ).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(2, 0))
+
         self.frame_controls = ttk.LabelFrame(controls_wrap, text=self.t("frame_controls"), padding=(8, 4))
         frame_button_row = ttk.Frame(self.frame_controls)
         frame_button_row.pack(fill=tk.X)
@@ -1121,9 +1730,8 @@ class LifToTifApp:
         auto_box = ttk.LabelFrame(controls_wrap, text=self.t("auto_settings"), padding=(8, 4))
         auto_box.pack(fill=tk.X, pady=(0, 6))
         for row_index, (label_key, var, width, min_value, max_value, increment) in enumerate((
-            ("low_percentile", self.auto_low_var, 6, 0.0, 100.0, 0.1),
-            ("high_percentile", self.auto_high_var, 6, 0.0, 100.0, 0.1),
-            ("target_max", self.auto_target_var, 6, 0.0, 255.0, 0.1),
+            ("low_percentile", self.auto_low_var, 6, 0.0, 100.0, 0.05),
+            ("high_percentile", self.auto_high_var, 6, 0.0, 100.0, 0.01),
             ("video_fps", self.video_fps_var, 6, 0.5, 60.0, 0.5),
         )):
             ttk.Label(auto_box, text=self.t(label_key)).grid(row=row_index, column=0, sticky=tk.W, padx=(0, 6), pady=2)
@@ -1141,7 +1749,7 @@ class LifToTifApp:
             auto_box,
             text=self.t("auto_video_speed"),
             variable=self.auto_video_speed_var,
-        ).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(2, 0))
+        ).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(2, 0))
 
         slider_area = ttk.Frame(controls_wrap)
         slider_area.pack(fill=tk.BOTH, expand=True)
@@ -1230,8 +1838,11 @@ class LifToTifApp:
         self.gamma_by_index.clear()
         self.black_by_index.clear()
         self.white_by_index.clear()
+        self.bw_locked_by_index.clear()
         self.include_merged_by_index.clear()
         self.lut_by_index.clear()
+        self.group_by_index = {record.lif_index: DEFAULT_GROUP_NAME for record in records}
+        self.group_var.set(DEFAULT_GROUP_NAME)
         self.path_var.set(f"LIF: {lif_path}")
         self.output_var.set(str((lif_path.parent / "提取出的tif").resolve()))
         self.populate_tree()
@@ -1278,6 +1889,7 @@ class LifToTifApp:
             image = self.lif.get_image(record.lif_index)
             self.current_record = record
             self.current_frame_index = 0
+            self.group_var.set(self.group_for_record(record))
             self.current_planes = [self.make_preview_plane(image, c, t=0) for c in range(image.channels)]
             self.ensure_channel_settings(record, image.channels)
             self.update_frame_controls()
@@ -1431,6 +2043,79 @@ class LifToTifApp:
         if self.play_button is not None:
             self.play_button.configure(text=self.t("play"))
 
+    def group_for_record(self, record: SeriesRecord) -> str:
+        return self.group_by_index.get(record.lif_index, DEFAULT_GROUP_NAME)
+
+    def normalized_group_name(self) -> str:
+        return self.group_var.get().strip() or DEFAULT_GROUP_NAME
+
+    def on_normalization_mode_changed(self) -> None:
+        if self.normalization_mode_var.get() == PUBLICATION_MODE:
+            for var in self.gamma_vars:
+                var.set(1.0)
+            self.sync_current_adjustments_from_controls()
+        self.render_preview()
+
+    def set_current_group(self) -> None:
+        if self.current_record is None:
+            return
+        group = self.normalized_group_name()
+        self.group_var.set(group)
+        self.group_by_index[self.current_record.lif_index] = group
+        self.update_info_text()
+        self.status_var.set(self.t("group_set", group=group))
+
+    def sync_current_adjustments_from_controls(self) -> None:
+        if self.current_record is None:
+            return
+        channel_count = max(
+            len(self.brightness_vars),
+            len(self.contrast_vars),
+            len(self.gamma_vars),
+            len(self.black_vars),
+            len(self.white_vars),
+            len(self.include_merged_vars),
+            len(self.lut_vars),
+            len(self.bw_lock_vars),
+        )
+        for channel in range(channel_count):
+            self.on_adjustment_changed(channel)
+
+    def apply_current_settings_to_group(self) -> None:
+        if self.current_record is None:
+            return
+        self.sync_current_adjustments_from_controls()
+        group = self.normalized_group_name()
+        self.group_var.set(group)
+        self.group_by_index[self.current_record.lif_index] = group
+        source_index = self.current_record.lif_index
+        source_maps = (
+            (self.brightness_by_index, [1.0]),
+            (self.contrast_by_index, [1.0]),
+            (self.gamma_by_index, [1.0]),
+            (self.black_by_index, [0.0]),
+            (self.white_by_index, [255.0]),
+            (self.bw_locked_by_index, [False]),
+            (self.include_merged_by_index, [True]),
+            (self.lut_by_index, list(self.current_record.channel_luts) or ["Gray"]),
+        )
+        for record in self.records:
+            if self.group_for_record(record) != group:
+                continue
+            channels = max(1, len(record.channel_luts))
+            for mapping, default_values in source_maps:
+                source_values = mapping.get(source_index, default_values)
+                copied = []
+                for channel in range(channels):
+                    if channel < len(source_values):
+                        copied.append(source_values[channel])
+                    else:
+                        copied.append(default_values[channel % len(default_values)])
+                mapping[record.lif_index] = copied
+        self.refresh_current_controls_from_settings()
+        self.render_preview()
+        self.status_var.set(self.t("group_applied", group=group))
+
     def ensure_channel_settings(self, record: SeriesRecord, channels: int) -> None:
         def extend_float(mapping: dict[int, list[float]], default: float) -> None:
             values = mapping.setdefault(record.lif_index, [])
@@ -1443,6 +2128,11 @@ class LifToTifApp:
         extend_float(self.gamma_by_index, 1.0)
         extend_float(self.black_by_index, 0.0)
         extend_float(self.white_by_index, 255.0)
+
+        lock_values = self.bw_locked_by_index.setdefault(record.lif_index, [])
+        while len(lock_values) < channels:
+            lock_values.append(False)
+        del lock_values[channels:]
 
         include_values = self.include_merged_by_index.setdefault(record.lif_index, [])
         while len(include_values) < channels:
@@ -1471,8 +2161,9 @@ class LifToTifApp:
             self.info_var.set("")
             return
         when = self.current_record.acquired_at.strftime("%Y-%m-%d %H:%M:%S") if self.current_record.acquired_at else self.t("unknown_time")
+        group = self.group_for_record(self.current_record)
         self.info_var.set(
-            f"{self.current_record.name} | {when} | {len(self.current_record.channel_luts)} {self.t('channels')} | {self.current_record.size_label}"
+            f"{self.current_record.name} | {when} | {group} | {len(self.current_record.channel_luts)} {self.t('channels')} | {self.current_record.size_label}"
         )
 
     def build_sliders(self, record: SeriesRecord, channels: int) -> None:
@@ -1483,6 +2174,7 @@ class LifToTifApp:
         gamma = self.gamma_by_index[record.lif_index]
         black = self.black_by_index[record.lif_index]
         white = self.white_by_index[record.lif_index]
+        bw_locked = self.bw_locked_by_index[record.lif_index]
         include_merged = self.include_merged_by_index[record.lif_index]
         lut_values = self.lut_by_index[record.lif_index]
         for idx in range(channels):
@@ -1496,6 +2188,11 @@ class LifToTifApp:
             include_var.trace_add("write", lambda *_args, channel=idx: self.on_adjustment_changed(channel))
             self.include_merged_vars.append(include_var)
             ttk.Checkbutton(top_row, text=self.t("include_merged"), variable=include_var).pack(side=tk.LEFT)
+
+            lock_var = tk.BooleanVar(value=bw_locked[idx])
+            lock_var.trace_add("write", lambda *_args, channel=idx: self.on_adjustment_changed(channel))
+            self.bw_lock_vars.append(lock_var)
+            ttk.Checkbutton(top_row, text=self.t("lock_bw"), variable=lock_var).pack(side=tk.LEFT, padx=(10, 0))
 
             ttk.Label(top_row, text=self.t("color")).pack(side=tk.LEFT, padx=(10, 4))
             lut_var = tk.StringVar(value=lut)
@@ -1562,6 +2259,7 @@ class LifToTifApp:
         self.lut_vars.clear()
         self.black_vars.clear()
         self.white_vars.clear()
+        self.bw_lock_vars.clear()
         self.gamma_vars.clear()
         self.brightness_vars.clear()
         self.contrast_vars.clear()
@@ -1578,6 +2276,7 @@ class LifToTifApp:
         gamma = self.gamma_by_index.setdefault(self.current_record.lif_index, [1.0] * len(self.gamma_vars))
         black = self.black_by_index.setdefault(self.current_record.lif_index, [0.0] * len(self.black_vars))
         white = self.white_by_index.setdefault(self.current_record.lif_index, [255.0] * len(self.white_vars))
+        bw_locked = self.bw_locked_by_index.setdefault(self.current_record.lif_index, [False] * len(self.bw_lock_vars))
         include_merged = self.include_merged_by_index.setdefault(self.current_record.lif_index, [True] * len(self.include_merged_vars))
         lut_values = self.lut_by_index.setdefault(self.current_record.lif_index, list(self.current_record.channel_luts))
         if channel < len(brightness):
@@ -1592,6 +2291,8 @@ class LifToTifApp:
             white[channel] = max(float(self.white_vars[channel].get()), black[channel] + 1.0)
             if float(self.white_vars[channel].get()) != white[channel]:
                 self.white_vars[channel].set(white[channel])
+        if channel < len(bw_locked):
+            bw_locked[channel] = bool(self.bw_lock_vars[channel].get())
         if channel < len(include_merged):
             include_merged[channel] = bool(self.include_merged_vars[channel].get())
         if channel < len(lut_values):
@@ -1635,6 +2336,8 @@ class LifToTifApp:
         include_merged = self.include_merged_by_index.get(self.current_record.lif_index, [True] * len(self.current_planes))
         lut_values = self.lut_by_index.get(self.current_record.lif_index, list(self.current_record.channel_luts))
         mode = self.preview_mode_var.get()
+        overlay_low = None
+        overlay_high = None
         if mode.startswith("C"):
             try:
                 idx = int(mode[1:]) - 1
@@ -1648,8 +2351,21 @@ class LifToTifApp:
             black_value = black[idx] if idx < len(black) else 0.0
             white_value = white[idx] if idx < len(white) else 255.0
             preview = colorize(self.current_planes[idx], lut, brightness_value, contrast_value, gamma_value, black_value, white_value)
+            if bool(self.clipping_overlay_var.get()):
+                display = to_uint8_display(
+                    self.current_planes[idx],
+                    brightness_value,
+                    contrast_value,
+                    gamma_value,
+                    black_value,
+                    white_value,
+                )
+                overlay_low = display <= 0
+                overlay_high = display >= 255
         else:
             merged_channels = []
+            low_masks = []
+            high_masks = []
             for idx, plane in enumerate(self.current_planes):
                 if idx < len(include_merged) and not include_merged[idx]:
                     continue
@@ -1661,12 +2377,21 @@ class LifToTifApp:
                 white_value = white[idx] if idx < len(white) else 255.0
                 colored = colorize(plane, lut, brightness_value, contrast_value, gamma_value, black_value, white_value)
                 merged_channels.append(colored)
+                if bool(self.clipping_overlay_var.get()):
+                    display = to_uint8_display(plane, brightness_value, contrast_value, gamma_value, black_value, white_value)
+                    low_masks.append(display <= 0)
+                    high_masks.append(display >= 255)
             merged = merge_colored(merged_channels, self.merge_mode_var.get())
             if merged is None:
                 self.preview_photo = None
                 self.preview_label.configure(image="", text=self.t("no_merged_channels"))
                 return
             preview = merged
+            if bool(self.clipping_overlay_var.get()) and low_masks and high_masks:
+                overlay_low = np.logical_and.reduce(low_masks)
+                overlay_high = np.logical_or.reduce(high_masks)
+        if bool(self.clipping_overlay_var.get()):
+            preview = apply_clipping_overlay(preview, overlay_low, overlay_high)
         image = Image.fromarray(preview)
         target_width = PREVIEW_SIZE
         target_height = PREVIEW_SIZE
@@ -1721,6 +2446,7 @@ class LifToTifApp:
         self.gamma_by_index[self.current_record.lif_index] = [1.0] * channels
         self.black_by_index[self.current_record.lif_index] = [0.0] * channels
         self.white_by_index[self.current_record.lif_index] = [255.0] * channels
+        self.bw_locked_by_index[self.current_record.lif_index] = [False] * channels
         self.include_merged_by_index[self.current_record.lif_index] = [True] * channels
         self.lut_by_index[self.current_record.lif_index] = [
             self.current_record.channel_luts[i] if i < len(self.current_record.channel_luts) else "Gray"
@@ -1732,6 +2458,8 @@ class LifToTifApp:
             var.set(0.0)
         for var in self.white_vars:
             var.set(255.0)
+        for var in self.bw_lock_vars:
+            var.set(False)
         for var in self.include_merged_vars:
             var.set(True)
         for idx, var in enumerate(self.lut_vars):
@@ -1746,18 +2474,18 @@ class LifToTifApp:
         self.gamma_by_index.clear()
         self.black_by_index.clear()
         self.white_by_index.clear()
+        self.bw_locked_by_index.clear()
         self.include_merged_by_index.clear()
         self.lut_by_index.clear()
         if self.current_record is not None:
             self.reset_current_adjustments()
         self.status_var.set(self.t("all_reset"))
 
-    def auto_parameters_for_plane(self, plane: np.ndarray) -> tuple[float, float, float]:
+    def auto_parameters_for_plane(self, plane: np.ndarray) -> tuple[float, float, float, float, float]:
         return compute_auto_parameters(
             plane,
             float(self.auto_low_var.get()),
             float(self.auto_high_var.get()),
-            float(self.auto_target_var.get()),
         )
 
     def apply_auto_to_record(self, record: SeriesRecord, planes: list[np.ndarray]) -> None:
@@ -1766,16 +2494,36 @@ class LifToTifApp:
         black_values = []
         white_values = []
         brightness_values = []
+        contrast_values = []
+        gamma_values = []
         for plane in planes:
-            black, white, brightness = self.auto_parameters_for_plane(plane)
+            black, white, brightness, contrast, gamma = self.auto_parameters_for_plane(plane)
             black_values.append(black)
             white_values.append(white)
             brightness_values.append(brightness)
+            contrast_values.append(contrast)
+            gamma_values.append(gamma)
+        locked = self.bw_locked_by_index.get(record.lif_index, [False] * channels)
+        old_black = self.black_by_index.get(record.lif_index, [])
+        old_white = self.white_by_index.get(record.lif_index, [])
+        for channel in range(channels):
+            if channel < len(locked) and locked[channel] and channel < len(old_black) and channel < len(old_white):
+                black_values[channel] = old_black[channel]
+                white_values[channel] = old_white[channel]
         self.black_by_index[record.lif_index] = black_values
         self.white_by_index[record.lif_index] = white_values
         self.brightness_by_index[record.lif_index] = brightness_values
-        self.contrast_by_index[record.lif_index] = [1.0] * channels
-        self.gamma_by_index[record.lif_index] = [1.0] * channels
+        self.contrast_by_index[record.lif_index] = contrast_values
+        self.gamma_by_index[record.lif_index] = gamma_values
+
+    def update_adjustment_maps_from_results(self, results: dict[str, dict[int, list]]) -> None:
+        self.brightness_by_index.update(results["brightness"])
+        self.contrast_by_index.update(results["contrast"])
+        self.gamma_by_index.update(results["gamma"])
+        self.black_by_index.update(results["black"])
+        self.white_by_index.update(results["white"])
+        self.include_merged_by_index.update(results["include"])
+        self.lut_by_index.update(results["lut"])
 
     def refresh_current_controls_from_settings(self) -> None:
         if self.current_record is None:
@@ -1791,6 +2539,8 @@ class LifToTifApp:
         for vars_list, values in mappings:
             for channel, value in enumerate(values[: len(vars_list)]):
                 vars_list[channel].set(value)
+        for channel, value in enumerate(self.bw_locked_by_index.get(idx, [])[: len(self.bw_lock_vars)]):
+            self.bw_lock_vars[channel].set(value)
         for channel, value in enumerate(self.include_merged_by_index.get(idx, [])[: len(self.include_merged_vars)]):
             self.include_merged_vars[channel].set(value)
         for channel, value in enumerate(self.lut_by_index.get(idx, [])[: len(self.lut_vars)]):
@@ -1801,7 +2551,22 @@ class LifToTifApp:
         if self.current_record is None or not self.current_planes:
             messagebox.showinfo(self.t("no_selected_title"), self.t("no_selected"))
             return
-        self.apply_auto_to_record(self.current_record, self.current_planes)
+        if self.normalization_mode_var.get() == PUBLICATION_MODE and self.lif is not None:
+            results = compute_publication_settings_for_records(
+                self.lif,
+                [self.current_record],
+                {self.current_record.lif_index: self.normalized_group_name()},
+                float(self.auto_low_var.get()),
+                float(self.auto_high_var.get()),
+                existing_black=self.black_by_index,
+                existing_white=self.white_by_index,
+                locked_by_index=self.bw_locked_by_index,
+                existing_include=self.include_merged_by_index,
+                existing_lut=self.lut_by_index,
+            )
+            self.update_adjustment_maps_from_results(results)
+        else:
+            self.apply_auto_to_record(self.current_record, self.current_planes)
         self.refresh_current_controls_from_settings()
         self.render_preview()
         self.status_var.set(self.t("auto_current_done"))
@@ -1812,17 +2577,32 @@ class LifToTifApp:
         if self.lif_path is None or not self.records:
             messagebox.showinfo(self.t("no_lif_title"), self.t("no_lif_msg"))
             return
+        if self.current_record is not None:
+            self.sync_current_adjustments_from_controls()
+            self.group_by_index[self.current_record.lif_index] = self.normalized_group_name()
         self.export_total = len(self.records)
         self.export_cancel_event = threading.Event()
         auto_params = (
             float(self.auto_low_var.get()),
             float(self.auto_high_var.get()),
-            float(self.auto_target_var.get()),
         )
+        normalization_mode = self.normalization_mode_var.get()
         self.set_exporting(self.t("auto_running"), self.export_total)
         thread = threading.Thread(
             target=self.auto_levels_all_worker,
-            args=(self.lif_path, list(self.records), auto_params, self.export_cancel_event),
+            args=(
+                self.lif_path,
+                list(self.records),
+                auto_params,
+                normalization_mode,
+                dict(self.group_by_index),
+                {key: list(value) for key, value in self.black_by_index.items()},
+                {key: list(value) for key, value in self.white_by_index.items()},
+                {key: list(value) for key, value in self.bw_locked_by_index.items()},
+                {key: list(value) for key, value in self.include_merged_by_index.items()},
+                {key: list(value) for key, value in self.lut_by_index.items()},
+                self.export_cancel_event,
+            ),
             daemon=True,
         )
         thread.start()
@@ -1831,42 +2611,76 @@ class LifToTifApp:
         self,
         lif_path: Path,
         records: list[SeriesRecord],
-        auto_params: tuple[float, float, float],
+        auto_params: tuple[float, float],
+        normalization_mode: str,
+        group_by_index: dict[int, str],
+        existing_black: dict[int, list[float]],
+        existing_white: dict[int, list[float]],
+        locked_by_index: dict[int, list[bool]],
+        existing_include: dict[int, list[bool]],
+        existing_lut: dict[int, list[str]],
         cancel_event: threading.Event,
     ) -> None:
         try:
             lif = LifFile(str(lif_path))
-            results = {
-                "brightness": {},
-                "contrast": {},
-                "gamma": {},
-                "black": {},
-                "white": {},
-                "include": {},
-                "lut": {},
-            }
-            for index, record in enumerate(records, start=1):
-                if cancel_event.is_set():
-                    raise ExportCancelled()
-                image = lif.get_image(record.lif_index)
-                planes = [make_preview_plane_array(image, c) for c in range(image.channels)]
-                black_values = []
-                white_values = []
-                brightness_values = []
-                for plane in planes:
-                    black, white, brightness = compute_auto_parameters(plane, *auto_params)
-                    black_values.append(black)
-                    white_values.append(white)
-                    brightness_values.append(brightness)
-                channels = image.channels
-                results["brightness"][record.lif_index] = brightness_values
-                results["contrast"][record.lif_index] = [1.0] * channels
-                results["gamma"][record.lif_index] = [1.0] * channels
-                results["black"][record.lif_index] = black_values
-                results["white"][record.lif_index] = white_values
-                results["include"][record.lif_index] = self.include_merged_by_index.get(record.lif_index, [True] * channels)
-                results["lut"][record.lif_index] = self.lut_by_index.get(record.lif_index, list(record.channel_luts))
-                self.worker_queue.put(("auto_progress", index))
+            if normalization_mode == PUBLICATION_MODE:
+                results = compute_publication_settings_for_records(
+                    lif,
+                    records,
+                    group_by_index,
+                    auto_params[0],
+                    auto_params[1],
+                    existing_black=existing_black,
+                    existing_white=existing_white,
+                    locked_by_index=locked_by_index,
+                    existing_include=existing_include,
+                    existing_lut=existing_lut,
+                    cancel_event=cancel_event,
+                    progress_callback=lambda done: self.worker_queue.put(("auto_progress", done)),
+                )
+            else:
+                results = {
+                    "brightness": {},
+                    "contrast": {},
+                    "gamma": {},
+                    "black": {},
+                    "white": {},
+                    "include": {},
+                    "lut": {},
+                }
+                for index, record in enumerate(records, start=1):
+                    if cancel_event.is_set():
+                        raise ExportCancelled()
+                    image = lif.get_image(record.lif_index)
+                    planes = [make_preview_plane_array(image, c) for c in range(image.channels)]
+                    black_values = []
+                    white_values = []
+                    brightness_values = []
+                    contrast_values = []
+                    gamma_values = []
+                    locks = locked_by_index.get(record.lif_index, [False] * image.channels)
+                    for channel, plane in enumerate(planes):
+                        black, white, brightness, contrast, gamma = compute_auto_parameters(plane, *auto_params)
+                        if channel < len(locks) and locks[channel]:
+                            old_black = existing_black.get(record.lif_index, [])
+                            old_white = existing_white.get(record.lif_index, [])
+                            if channel < len(old_black) and channel < len(old_white):
+                                black = old_black[channel]
+                                white = old_white[channel]
+                        black_values.append(black)
+                        white_values.append(white)
+                        brightness_values.append(brightness)
+                        contrast_values.append(contrast)
+                        gamma_values.append(gamma)
+                    channels = image.channels
+                    results["brightness"][record.lif_index] = brightness_values
+                    results["contrast"][record.lif_index] = contrast_values
+                    results["gamma"][record.lif_index] = gamma_values
+                    results["black"][record.lif_index] = black_values
+                    results["white"][record.lif_index] = white_values
+                    results["include"][record.lif_index] = existing_include.get(record.lif_index, [True] * channels)
+                    results["lut"][record.lif_index] = existing_lut.get(record.lif_index, list(record.channel_luts))
+                    self.worker_queue.put(("auto_progress", index))
             self.worker_queue.put(("auto_ok", results, len(records)))
         except ExportCancelled:
             self.worker_queue.put(("cancelled", Path(self.output_var.get()).expanduser().resolve()))
@@ -1916,6 +2730,9 @@ class LifToTifApp:
         if self.lif_path is None:
             messagebox.showinfo(self.t("no_lif_title"), self.t("no_lif_msg"))
             return
+        if self.current_record is not None:
+            self.sync_current_adjustments_from_controls()
+            self.group_by_index[self.current_record.lif_index] = self.normalized_group_name()
         try:
             output_root = self.current_output_root()
             output_root.mkdir(parents=True, exist_ok=True)
@@ -1930,6 +2747,8 @@ class LifToTifApp:
         self.export_total = expected_output_count(records_with_sequence, adjustment_maps[5], apply_adjustments)
         self.export_cancel_event = threading.Event()
         manual_video_fps = self.manual_video_fps()
+        normalization_mode = self.normalization_mode_var.get()
+        group_by_index = dict(self.group_by_index)
 
         self.set_exporting(self.t("exporting_label", label=label), self.export_total)
         thread = threading.Thread(
@@ -1943,6 +2762,8 @@ class LifToTifApp:
                 apply_adjustments,
                 self.merge_mode_var.get(),
                 manual_video_fps,
+                normalization_mode,
+                group_by_index,
                 self.export_cancel_event,
             ),
             daemon=True,
@@ -2033,6 +2854,8 @@ class LifToTifApp:
         apply_adjustments: bool,
         merge_mode: str,
         manual_video_fps: float | None,
+        normalization_mode: str,
+        group_by_index: dict[int, str],
         cancel_event: threading.Event,
     ) -> None:
         try:
@@ -2054,6 +2877,8 @@ class LifToTifApp:
                 apply_adjustments,
                 merge_mode,
                 manual_video_fps,
+                normalization_mode,
+                group_by_index,
                 progress_callback=progress_callback,
                 cancel_event=cancel_event,
             )
@@ -2082,13 +2907,7 @@ class LifToTifApp:
             self.status_var.set(self.t("exporting_progress", done=done, total=total))
         elif message[0] == "auto_ok":
             _, results, count = message
-            self.brightness_by_index.update(results["brightness"])
-            self.contrast_by_index.update(results["contrast"])
-            self.gamma_by_index.update(results["gamma"])
-            self.black_by_index.update(results["black"])
-            self.white_by_index.update(results["white"])
-            self.include_merged_by_index.update(results["include"])
-            self.lut_by_index.update(results["lut"])
+            self.update_adjustment_maps_from_results(results)
             if self.current_record is not None:
                 self.refresh_current_controls_from_settings()
                 self.render_preview()
