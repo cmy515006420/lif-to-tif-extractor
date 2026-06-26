@@ -45,7 +45,9 @@ Publication-Safe 自动调节 / Publication-Safe Auto Adjustment
 - 自动调节只计算线性 display range: output = clip((raw - black_point) / (white_point - black_point), 0, 1)
 - Auto adjustment only computes a linear display range: output = clip((raw - black_point) / (white_point - black_point), 0, 1)
 - Gamma 默认保持 1.0；同一 comparison group 内同一 channel 使用同一套 black/white。
+- Publication 模式会把额外 brightness、contrast、gamma 固定为 1.0；想做单张视觉预览时请切到 Preview 模式。
 - Gamma stays at 1.0 by default; the same channel within the same comparison group uses the same black/white range.
+- Publication mode keeps extra brightness, contrast, and gamma fixed at 1.0; switch to Preview mode for individual visual previews.
 - time-lapse / z-stack / 连续帧视频按整个 stack/video 为同一 channel 统一计算 display range，避免逐帧 auto contrast 闪烁。
 - Time-lapse / z-stack / continuous videos use one display range per channel across the whole stack/video to avoid frame-by-frame auto contrast flicker.
 - hot pixel 和极亮离群点只在计算 display range 时作为 outlier 处理；raw TIFF 不会被删除或修改。

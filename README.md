@@ -57,6 +57,7 @@ This tool converts Leica `.lif` confocal files into sorted TIFF folders, time-la
 `output = clip((raw - black_point) / (white_point - black_point), 0, 1)`
 
 - `Gamma` 默认保持 `1.0`。
+- `Publication` 模式会把额外 brightness、contrast、gamma 固定为 `1.0`；想做单张视觉预览时请切到 `Preview` 模式。
 - 同一 comparison group 内，同一 channel 使用同一套 black/white。
 - time-lapse / z-stack / 连续帧视频按整个 stack/video 为同一 channel 统一计算 display range，避免逐帧 auto contrast 造成闪烁或掩盖真实强度变化。
 - hot pixel 和极亮离群点只在计算 display range 时作为 outlier 处理；raw TIFF 不会被删除或修改。
@@ -68,6 +69,7 @@ The default `Publication` mode does not apply ordinary photo enhancement: no CLA
 `output = clip((raw - black_point) / (white_point - black_point), 0, 1)`
 
 - `Gamma` stays at `1.0` by default.
+- `Publication` mode keeps extra brightness, contrast, and gamma fixed at `1.0`; switch to `Preview` mode for individual visual previews.
 - The same channel within the same comparison group uses the same black/white range.
 - Time-lapse / z-stack / continuous videos use one display range per channel across the whole stack/video, avoiding frame-by-frame auto contrast flicker.
 - Hot pixels and extreme outliers are handled only when estimating the display range; raw TIFFs are not removed or modified.

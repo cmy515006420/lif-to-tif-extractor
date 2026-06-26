@@ -2051,7 +2051,7 @@ class LifToTifApp:
 
     def on_normalization_mode_changed(self) -> None:
         if self.normalization_mode_var.get() == PUBLICATION_MODE:
-            for var in self.gamma_vars:
+            for var in self.brightness_vars + self.contrast_vars + self.gamma_vars:
                 var.set(1.0)
             self.sync_current_adjustments_from_controls()
         self.render_preview()
@@ -2271,6 +2271,7 @@ class LifToTifApp:
         if self.current_record is None:
             return
         self.ensure_channel_settings(self.current_record, len(self.brightness_vars))
+        publication_mode = self.normalization_mode_var.get() == PUBLICATION_MODE
         brightness = self.brightness_by_index.setdefault(self.current_record.lif_index, [1.0] * len(self.brightness_vars))
         contrast = self.contrast_by_index.setdefault(self.current_record.lif_index, [1.0] * len(self.contrast_vars))
         gamma = self.gamma_by_index.setdefault(self.current_record.lif_index, [1.0] * len(self.gamma_vars))
@@ -2280,11 +2281,26 @@ class LifToTifApp:
         include_merged = self.include_merged_by_index.setdefault(self.current_record.lif_index, [True] * len(self.include_merged_vars))
         lut_values = self.lut_by_index.setdefault(self.current_record.lif_index, list(self.current_record.channel_luts))
         if channel < len(brightness):
-            brightness[channel] = float(self.brightness_vars[channel].get())
+            if publication_mode:
+                if abs(float(self.brightness_vars[channel].get()) - 1.0) > 0.001:
+                    self.brightness_vars[channel].set(1.0)
+                brightness[channel] = 1.0
+            else:
+                brightness[channel] = float(self.brightness_vars[channel].get())
         if channel < len(contrast):
-            contrast[channel] = float(self.contrast_vars[channel].get())
+            if publication_mode:
+                if abs(float(self.contrast_vars[channel].get()) - 1.0) > 0.001:
+                    self.contrast_vars[channel].set(1.0)
+                contrast[channel] = 1.0
+            else:
+                contrast[channel] = float(self.contrast_vars[channel].get())
         if channel < len(gamma):
-            gamma[channel] = float(self.gamma_vars[channel].get())
+            if publication_mode:
+                if abs(float(self.gamma_vars[channel].get()) - 1.0) > 0.001:
+                    self.gamma_vars[channel].set(1.0)
+                gamma[channel] = 1.0
+            else:
+                gamma[channel] = float(self.gamma_vars[channel].get())
         if channel < len(black):
             black[channel] = float(self.black_vars[channel].get())
         if channel < len(white):
