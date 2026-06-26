@@ -62,6 +62,7 @@ STRINGS = {
         "open_lif": "打开 LIF",
         "choose_output": "选择输出文件夹",
         "open_output": "打开输出文件夹",
+        "open_after_export": "导出后打开文件夹",
         "export_current": "导出当前图",
         "export_all_current": "一次预览导出全部",
         "export_all_per_image": "按各图参数导出全部",
@@ -77,6 +78,7 @@ STRINGS = {
         "output": "输出:",
         "preview_area": "预览区",
         "select_preview": "选择左侧图像预览",
+        "no_merged_channels": "Merged 未选择通道",
         "frame_controls": "Frame / 时间点",
         "prev_frame": "上一帧",
         "next_frame": "下一帧",
@@ -124,6 +126,11 @@ STRINGS = {
         "export_done_status": "导出完成: {count} 个文件记录",
         "export_done_title": "导出完成",
         "export_done_msg": "已导出到:\n{output}\n\n记录数: {count}\n记录表:\n{manifest}",
+        "open_output_failed_title": "无法打开输出文件夹",
+        "open_output_failed": "无法打开输出文件夹:\n{error}",
+        "bad_output_title": "输出文件夹不可用",
+        "bad_output": "请检查输出文件夹路径:\n{error}",
+        "empty_output_path": "输出文件夹路径为空。",
         "cancelled_status": "导出已取消",
         "cancelled_title": "导出已取消",
         "cancelled_msg": "已停止导出。\n已写出的文件保留在:\n{output}",
@@ -143,6 +150,7 @@ STRINGS = {
         "open_lif": "Open LIF",
         "choose_output": "Choose Output Folder",
         "open_output": "Open Output Folder",
+        "open_after_export": "Open folder after export",
         "export_current": "Export Current",
         "export_all_current": "Preview Once, Export All",
         "export_all_per_image": "Export All With Per-Image Settings",
@@ -158,6 +166,7 @@ STRINGS = {
         "output": "Output:",
         "preview_area": "Preview",
         "select_preview": "Select an image on the left to preview",
+        "no_merged_channels": "No channels selected for Merged",
         "frame_controls": "Frame / Time Point",
         "prev_frame": "Previous",
         "next_frame": "Next",
@@ -205,6 +214,11 @@ STRINGS = {
         "export_done_status": "Export complete: {count} file records",
         "export_done_title": "Export Complete",
         "export_done_msg": "Exported to:\n{output}\n\nRecords: {count}\nManifest:\n{manifest}",
+        "open_output_failed_title": "Cannot Open Output Folder",
+        "open_output_failed": "Cannot open the output folder:\n{error}",
+        "bad_output_title": "Output Folder Unavailable",
+        "bad_output": "Please check the output folder path:\n{error}",
+        "empty_output_path": "Output folder path is empty.",
         "cancelled_status": "Export cancelled",
         "cancelled_title": "Export Cancelled",
         "cancelled_msg": "Export stopped.\nAlready written files remain in:\n{output}",
@@ -538,16 +552,29 @@ def discover_records(lif: LifFile) -> list[SeriesRecord]:
     return sorted(records, key=sort_key)
 
 
-def expected_output_count(records_with_sequence: Iterable[tuple[int, SeriesRecord]]) -> int:
+def expected_output_count(
+    records_with_sequence: Iterable[tuple[int, SeriesRecord]],
+    include_merged_by_index: dict[int, list[bool]] | None = None,
+    apply_adjustments: bool = True,
+) -> int:
     total = 0
     for _sequence, record in records_with_sequence:
         _x, _y, z, t, m = record.dims
         channel_count = max(1, len(record.channel_luts))
-        total += ((channel_count * 2) + 1) * z * t * m
+        include_values = (include_merged_by_index or {}).get(record.lif_index, [True] * channel_count)
+        has_merged = True
+        if apply_adjustments:
+            has_merged = any(
+                include_values[channel_index] if channel_index < len(include_values) else True
+                for channel_index in range(channel_count)
+            )
+        merged_count = 1 if has_merged else 0
+        total += ((channel_count * 2) + merged_count) * z * t * m
         if t > 1:
-            total += (channel_count + 1) * z * m
+            video_output_count = channel_count + merged_count
+            total += video_output_count * z * m
             if imageio is not None and imageio_ffmpeg is not None:
-                total += (channel_count + 1) * z * m
+                total += video_output_count * z * m
     return total
 
 
@@ -898,6 +925,7 @@ class LifToTifApp:
         self.frame_var = tk.IntVar(value=1)
         self.frame_label_var = tk.StringVar(value="")
         self.apply_brightness_var = tk.BooleanVar(value=True)
+        self.open_after_export_var = tk.BooleanVar(value=True)
         self.include_merged_vars: list[tk.BooleanVar] = []
         self.lut_vars: list[tk.StringVar] = []
         self.black_vars: list[tk.DoubleVar] = []
@@ -982,6 +1010,9 @@ class LifToTifApp:
         self.track_busy_control(ttk.Button(row3, text=self.t("auto_all"), command=self.auto_levels_all)).pack(
             side=tk.LEFT, padx=(8, 0)
         )
+        self.track_busy_control(
+            ttk.Checkbutton(row3, text=self.t("open_after_export"), variable=self.open_after_export_var)
+        ).pack(side=tk.LEFT, padx=(18, 0))
 
         path_bar = ttk.Frame(self.root, padding=(12, 0, 12, 8))
         path_bar.pack(fill=tk.X)
@@ -1632,6 +1663,8 @@ class LifToTifApp:
                 merged_channels.append(colored)
             merged = merge_colored(merged_channels, self.merge_mode_var.get())
             if merged is None:
+                self.preview_photo = None
+                self.preview_label.configure(image="", text=self.t("no_merged_channels"))
                 return
             preview = merged
         image = Image.fromarray(preview)
@@ -1644,15 +1677,39 @@ class LifToTifApp:
         self.preview_photo = ImageTk.PhotoImage(image)
         self.preview_label.configure(image=self.preview_photo, text="")
 
+    def current_output_root(self) -> Path:
+        output_text = self.output_var.get().strip()
+        if not output_text:
+            raise ValueError(self.t("empty_output_path"))
+        return Path(output_text).expanduser().resolve()
+
     def choose_output(self) -> None:
-        folder = filedialog.askdirectory(title=self.t("choose_output"), initialdir=str(Path(self.output_var.get()).parent))
+        try:
+            initial_dir = str(self.current_output_root().parent)
+        except Exception:
+            initial_dir = str(APP_DIR)
+        folder = filedialog.askdirectory(title=self.t("choose_output"), initialdir=initial_dir)
         if folder:
             self.output_var.set(str(Path(folder).resolve()))
 
     def open_output_folder(self) -> None:
-        folder = Path(self.output_var.get()).expanduser().resolve()
-        folder.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["open", str(folder)], check=False)
+        try:
+            self.open_folder_path(self.current_output_root(), show_error=True)
+        except Exception as exc:
+            messagebox.showerror(self.t("open_output_failed_title"), self.t("open_output_failed", error=exc))
+
+    def open_folder_path(self, folder: Path, show_error: bool = False) -> bool:
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            result = subprocess.run(["open", str(folder)], capture_output=True, text=True, check=False)
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip()
+                raise RuntimeError(detail or str(folder))
+            return True
+        except Exception as exc:
+            if show_error:
+                messagebox.showerror(self.t("open_output_failed_title"), self.t("open_output_failed", error=exc))
+            return False
 
     def reset_current_adjustments(self) -> None:
         if self.current_record is None:
@@ -1859,14 +1916,18 @@ class LifToTifApp:
         if self.lif_path is None:
             messagebox.showinfo(self.t("no_lif_title"), self.t("no_lif_msg"))
             return
-        output_root = Path(self.output_var.get()).expanduser().resolve()
+        try:
+            output_root = self.current_output_root()
+            output_root.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            messagebox.showerror(self.t("bad_output_title"), self.t("bad_output", error=exc))
+            return
         apply_adjustments = bool(self.apply_brightness_var.get())
-        output_root.mkdir(parents=True, exist_ok=True)
         manifest_path = output_root / f"提取记录_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         adjustment_maps = self.export_adjustment_maps(
             records_with_sequence, use_current_adjustments
         )
-        self.export_total = expected_output_count(records_with_sequence)
+        self.export_total = expected_output_count(records_with_sequence, adjustment_maps[5], apply_adjustments)
         self.export_cancel_event = threading.Event()
         manual_video_fps = self.manual_video_fps()
 
@@ -2035,6 +2096,8 @@ class LifToTifApp:
         elif message[0] == "ok":
             _, count, output_root, manifest_path = message
             self.clear_busy(self.t("export_done_status", count=count))
+            if bool(self.open_after_export_var.get()):
+                self.open_folder_path(output_root)
             messagebox.showinfo(
                 self.t("export_done_title"),
                 self.t("export_done_msg", output=output_root, count=count, manifest=manifest_path),
