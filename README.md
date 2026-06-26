@@ -9,8 +9,8 @@ This tool converts Leica `.lif` confocal files into sorted TIFF folders, time-la
 - macOS only / 仅支持 macOS
 - 首次允许后，启动脚本会自动清除本软件文件夹的 macOS 下载隔离标记，减少反复授权弹窗。
 - After the first macOS approval, the launcher automatically removes the quarantine flag from this app folder to avoid repeated prompts.
-- 启动脚本会在本机自动准备 Python 依赖到 `vendor/`，该目录不会上传到 GitHub。
-- The launcher installs Python dependencies into the local `vendor/` folder when needed; `vendor/` is not uploaded to GitHub.
+- 启动脚本每次会检查 Python 依赖，缺失或版本过旧时自动准备到 `vendor/`；该目录不会上传到 GitHub。
+- The launcher checks Python dependencies each time and installs or updates them into the local `vendor/` folder when needed; `vendor/` is not uploaded to GitHub.
 
 ## 使用 / Usage
 
@@ -67,9 +67,9 @@ By default, auto adjustment estimates each channel's black point from the backgr
 
 ## 数据安全 / Data Safety
 
-本仓库不包含测试图片、显微图原始数据或导出结果。`.gitignore` 已排除 `.lif`、`.tif`、`testlif/`、导出目录、测试输出、缓存和本地依赖。
+本仓库不包含测试图片、显微图原始数据或导出结果。`.gitignore` 已排除 `.lif`、`.tif`、`.avi`、`.gif`、记录表、`testlif/`、导出目录、测试输出、缓存和本地依赖。
 
-This repository does not include test images, microscopy source data, or exported results. The `.gitignore` excludes `.lif`, `.tif`, `testlif/`, exported folders, test output, caches, and local dependencies.
+This repository does not include test images, microscopy source data, or exported results. The `.gitignore` excludes `.lif`, `.tif`, `.avi`, `.gif`, manifest tables, `testlif/`, exported folders, test output, caches, and local dependencies.
 
 ## 许可 / License
 

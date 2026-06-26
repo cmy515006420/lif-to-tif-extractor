@@ -53,6 +53,7 @@ LUT_RGB = {
     "grey": (1.0, 1.0, 1.0),
 }
 LUT_CHOICES = ("Green", "Red", "Blue", "Cyan", "Magenta", "Yellow", "White", "Gray")
+DEFAULT_CHANNEL_LUTS = ("Green", "Red", "Blue", "Cyan", "Magenta", "Yellow", "White", "Gray")
 MERGE_MODES = ("Max", "Additive")
 
 STRINGS = {
@@ -300,9 +301,19 @@ def infer_frame_interval_seconds(element, frame_count: int) -> float | None:
     return None
 
 
-def channel_luts(element) -> tuple[str, ...]:
+def channel_luts(element, channel_count: int | None = None) -> tuple[str, ...]:
     channels = element.findall("./Data/Image/ImageDescription/Channels/ChannelDescription")
-    return tuple((channel.attrib.get("LUTName") or "Gray") for channel in channels)
+    values = [(channel.attrib.get("LUTName") or "").strip() for channel in channels]
+    if channel_count is None:
+        return tuple(value or "Gray" for value in values)
+
+    normalized = []
+    for index in range(channel_count):
+        if index < len(values) and values[index]:
+            normalized.append(values[index])
+        else:
+            normalized.append(DEFAULT_CHANNEL_LUTS[index % len(DEFAULT_CHANNEL_LUTS)])
+    return tuple(normalized)
 
 
 def sort_key(record: SeriesRecord):
@@ -518,7 +529,7 @@ def discover_records(lif: LifFile) -> list[SeriesRecord]:
                 lif_index=idx,
                 name=image.name,
                 acquired_at=first_timestamp(element),
-                channel_luts=channel_luts(element),
+                channel_luts=channel_luts(element, int(image.channels)),
                 size_label=size_label,
                 dims=dims,
                 frame_interval_seconds=infer_frame_interval_seconds(element, dims[3]),
@@ -857,8 +868,8 @@ class LifToTifApp:
         self.auto_video_speed_var = tk.BooleanVar(value=True)
         self.video_fps_var = tk.DoubleVar(value=5.0)
         self.root.title(self.t("app_title"))
-        self.root.geometry("1600x950")
-        self.root.minsize(1450, 800)
+        self.root.geometry("1400x900")
+        self.root.minsize(1180, 760)
 
         self.lif_path: Path | None = None
         self.lif: LifFile | None = None
@@ -932,12 +943,15 @@ class LifToTifApp:
         ttk.Checkbutton(row2, text=self.t("apply_all_adjustments"), variable=self.apply_brightness_var).pack(
             side=tk.LEFT, padx=(18, 0)
         )
-        ttk.Button(row2, text=self.t("reset_current"), command=self.reset_current_adjustments).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(row2, text=self.t("reset_all"), command=self.reset_all_adjustments).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(row2, text=self.t("auto_levels"), command=self.auto_levels_current).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(row2, text=self.t("auto_all"), command=self.auto_levels_all).pack(side=tk.LEFT, padx=(8, 0))
         self.cancel_button = ttk.Button(row2, text=self.t("cancel_export"), command=self.cancel_export, state=tk.DISABLED)
         self.cancel_button.pack(side=tk.LEFT, padx=(8, 0))
+
+        row3 = ttk.Frame(toolbar)
+        row3.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(row3, text=self.t("reset_current"), command=self.reset_current_adjustments).pack(side=tk.LEFT)
+        ttk.Button(row3, text=self.t("reset_all"), command=self.reset_all_adjustments).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(row3, text=self.t("auto_levels"), command=self.auto_levels_current).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(row3, text=self.t("auto_all"), command=self.auto_levels_all).pack(side=tk.LEFT, padx=(8, 0))
 
         path_bar = ttk.Frame(self.root, padding=(12, 0, 12, 8))
         path_bar.pack(fill=tk.X)

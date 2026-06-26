@@ -4,8 +4,8 @@ LIF 转 TIF 提取器 / LIF to TIFF Extractor
 - 仅支持 macOS / macOS only
 - 首次允许后，启动脚本会自动清除本软件文件夹的 macOS 下载隔离标记，减少反复授权弹窗。
 - After the first macOS approval, the launcher automatically removes the quarantine flag from this app folder to avoid repeated prompts.
-- 第一次启动会自动安装 Python 依赖到本机 vendor 文件夹。
-- On first launch, Python dependencies are installed into the local vendor folder.
+- 启动脚本每次会检查 Python 依赖，缺失或版本过旧时自动准备到本机 vendor 文件夹。
+- The launcher checks Python dependencies each time and installs or updates them into the local vendor folder when needed.
 
 启动 / Launch
 1. 双击 start_lif_to_tif.command
@@ -69,7 +69,7 @@ First Launch on macOS
 安全说明 / Safety Notes
 - 本仓库不包含测试图片、显微图原始数据或导出结果。
 - This repository does not include test images, microscopy source data, or exported results.
-- .gitignore 已排除 .lif、.tif、testlif、提取出的tif、测试输出和缓存。
-- The .gitignore excludes .lif, .tif, testlif, exported TIFF folders, test output, and caches.
+- .gitignore 已排除 .lif、.tif、.avi、.gif、记录表、testlif、提取出的tif、测试输出和缓存。
+- The .gitignore excludes .lif, .tif, .avi, .gif, manifest tables, testlif, exported TIFF folders, test output, and caches.
 - 本项目文件夹中不要提交显微图原始数据或导出图片。
 - Do not commit microscopy source data or exported images.

@@ -5,6 +5,10 @@
 *.png
 *.jpg
 *.jpeg
+*.avi
+*.gif
+*.csv
+*.mp4
 
 # Local test/source data folders
 testlif/
