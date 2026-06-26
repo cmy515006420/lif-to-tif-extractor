@@ -732,7 +732,7 @@ def export_records(
                         "frame_interval_seconds": (
                             f"{record.frame_interval_seconds:.6g}" if record.frame_interval_seconds is not None else ""
                         ),
-                        "lut": "+".join(record.channel_luts),
+                        "lut": "+".join(lut_values if apply_adjustments else list(record.channel_luts)),
                         "include_merged": "merged",
                         "black": "applied" if apply_adjustments else "0.0",
                         "white": "applied" if apply_adjustments else "255.0",
@@ -912,6 +912,7 @@ class LifToTifApp:
         self.frame_scale: tk.Scale | None = None
         self.play_button: ttk.Button | None = None
         self.preview_mode_row: ttk.Frame | None = None
+        self.busy_controls: list[tuple[tk.Widget, str]] = []
 
         self.build_ui()
         self.root.after(150, self.poll_worker_queue)
@@ -920,27 +921,48 @@ class LifToTifApp:
         text = STRINGS.get(self.language, STRINGS["zh"]).get(key, key)
         return text.format(**kwargs) if kwargs else text
 
+    def track_busy_control(self, widget: tk.Widget, enabled_state: str = tk.NORMAL) -> tk.Widget:
+        self.busy_controls.append((widget, enabled_state))
+        return widget
+
+    def set_busy_controls_enabled(self, enabled: bool) -> None:
+        for widget, enabled_state in self.busy_controls:
+            try:
+                widget.configure(state=enabled_state if enabled else tk.DISABLED)
+            except tk.TclError:
+                pass
+
     def build_ui(self) -> None:
         self.root.title(self.t("app_title"))
+        self.busy_controls.clear()
         toolbar = ttk.Frame(self.root, padding=(12, 10))
         toolbar.pack(fill=tk.X)
 
         row1 = ttk.Frame(toolbar)
         row1.pack(fill=tk.X)
-        ttk.Button(row1, text=self.t("open_lif"), command=self.open_lif).pack(side=tk.LEFT)
-        ttk.Button(row1, text=self.t("choose_output"), command=self.choose_output).pack(side=tk.LEFT, padx=(8, 0))
+        self.track_busy_control(ttk.Button(row1, text=self.t("open_lif"), command=self.open_lif)).pack(side=tk.LEFT)
+        self.track_busy_control(ttk.Button(row1, text=self.t("choose_output"), command=self.choose_output)).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
         ttk.Button(row1, text=self.t("open_output"), command=self.open_output_folder).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Label(row1, text=self.t("language")).pack(side=tk.LEFT, padx=(18, 6))
         lang_box = ttk.Combobox(row1, textvariable=self.lang_var, values=("中文", "English"), width=10, state="readonly")
+        self.track_busy_control(lang_box, "readonly")
         lang_box.pack(side=tk.LEFT)
         lang_box.bind("<<ComboboxSelected>>", self.on_language_changed)
 
         row2 = ttk.Frame(toolbar)
         row2.pack(fill=tk.X, pady=(8, 0))
-        ttk.Button(row2, text=self.t("export_current"), command=self.export_current).pack(side=tk.LEFT)
-        ttk.Button(row2, text=self.t("export_all_current"), command=self.export_all_with_current).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(row2, text=self.t("export_all_per_image"), command=self.export_all_per_image).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Checkbutton(row2, text=self.t("apply_all_adjustments"), variable=self.apply_brightness_var).pack(
+        self.track_busy_control(ttk.Button(row2, text=self.t("export_current"), command=self.export_current)).pack(side=tk.LEFT)
+        self.track_busy_control(ttk.Button(row2, text=self.t("export_all_current"), command=self.export_all_with_current)).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        self.track_busy_control(
+            ttk.Button(row2, text=self.t("export_all_per_image"), command=self.export_all_per_image)
+        ).pack(side=tk.LEFT, padx=(8, 0))
+        self.track_busy_control(
+            ttk.Checkbutton(row2, text=self.t("apply_all_adjustments"), variable=self.apply_brightness_var)
+        ).pack(
             side=tk.LEFT, padx=(18, 0)
         )
         self.cancel_button = ttk.Button(row2, text=self.t("cancel_export"), command=self.cancel_export, state=tk.DISABLED)
@@ -948,10 +970,18 @@ class LifToTifApp:
 
         row3 = ttk.Frame(toolbar)
         row3.pack(fill=tk.X, pady=(8, 0))
-        ttk.Button(row3, text=self.t("reset_current"), command=self.reset_current_adjustments).pack(side=tk.LEFT)
-        ttk.Button(row3, text=self.t("reset_all"), command=self.reset_all_adjustments).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(row3, text=self.t("auto_levels"), command=self.auto_levels_current).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(row3, text=self.t("auto_all"), command=self.auto_levels_all).pack(side=tk.LEFT, padx=(8, 0))
+        self.track_busy_control(ttk.Button(row3, text=self.t("reset_current"), command=self.reset_current_adjustments)).pack(
+            side=tk.LEFT
+        )
+        self.track_busy_control(ttk.Button(row3, text=self.t("reset_all"), command=self.reset_all_adjustments)).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        self.track_busy_control(ttk.Button(row3, text=self.t("auto_levels"), command=self.auto_levels_current)).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        self.track_busy_control(ttk.Button(row3, text=self.t("auto_all"), command=self.auto_levels_all)).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
 
         path_bar = ttk.Frame(self.root, padding=(12, 0, 12, 8))
         path_bar.pack(fill=tk.X)
@@ -1720,6 +1750,8 @@ class LifToTifApp:
         self.status_var.set(self.t("auto_current_done"))
 
     def auto_levels_all(self) -> None:
+        if self.export_cancel_event is not None:
+            return
         if self.lif_path is None or not self.records:
             messagebox.showinfo(self.t("no_lif_title"), self.t("no_lif_msg"))
             return
@@ -1822,6 +1854,8 @@ class LifToTifApp:
         label: str,
         use_current_adjustments: bool = False,
     ) -> None:
+        if self.export_cancel_event is not None:
+            return
         if self.lif_path is None:
             messagebox.showinfo(self.t("no_lif_title"), self.t("no_lif_msg"))
             return
@@ -2024,12 +2058,14 @@ class LifToTifApp:
         self.status_var.set(text)
         self.progress.stop()
         self.progress.configure(mode="determinate", maximum=max(1, total), value=0)
+        self.set_busy_controls_enabled(False)
         self.cancel_button.configure(state=tk.NORMAL)
 
     def clear_busy(self, text: str | None = None) -> None:
         self.progress.stop()
         self.progress.configure(mode="determinate", value=0)
         self.cancel_button.configure(state=tk.DISABLED)
+        self.set_busy_controls_enabled(True)
         self.export_cancel_event = None
         if text is not None:
             self.status_var.set(text)

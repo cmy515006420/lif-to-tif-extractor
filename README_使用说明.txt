@@ -69,7 +69,7 @@ First Launch on macOS
 安全说明 / Safety Notes
 - 本仓库不包含测试图片、显微图原始数据或导出结果。
 - This repository does not include test images, microscopy source data, or exported results.
-- .gitignore 已排除 .lif、.tif、.avi、.gif、记录表、testlif、提取出的tif、测试输出和缓存。
-- The .gitignore excludes .lif, .tif, .avi, .gif, manifest tables, testlif, exported TIFF folders, test output, and caches.
+- .gitignore 已排除 .lif、.tif、.avi、.gif、.mp4、.mov、记录表、testlif、提取出的tif、测试输出和缓存。
+- The .gitignore excludes .lif, .tif, .avi, .gif, .mp4, .mov, manifest tables, testlif, exported TIFF folders, test output, and caches.
 - 本项目文件夹中不要提交显微图原始数据或导出图片。
 - Do not commit microscopy source data or exported images.

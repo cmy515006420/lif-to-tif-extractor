@@ -9,6 +9,8 @@
 *.gif
 *.csv
 *.mp4
+*.mov
+*.m4v
 
 # Local test/source data folders
 testlif/
