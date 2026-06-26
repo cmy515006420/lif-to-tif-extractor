@@ -22,9 +22,13 @@ First Launch on macOS
 - 按 LIF 内部拍摄时间排序 / Sort series by acquisition time stored in the LIF
 - 每个 series 单独建文件夹 / Put each series in its own folder
 - 按实际通道数动态生成 C1、C2、C3、C4... / Dynamically create C1, C2, C3, C4... for however many channels are in the LIF
-- 混合通道输出到 Merged 文件夹 / Export merged image into the Merged folder
+- 原始单通道输出到 Raw/C1、Raw/C2...，保留原始位深且不应用显示增强 / Raw single-channel TIFFs are exported to Raw/C1, Raw/C2... with original bit depth and no display adjustment
+- 调整后的显示图输出到 C1、C2...，混合通道输出到 Merged 文件夹 / Adjusted display TIFFs are exported to C1, C2... and merged images to Merged
 - 每个通道可独立调颜色、是否参与 Merged、黑场、白场、Gamma、亮度和对比度 / Per-channel color, include-in-merged, black point, white point, gamma, brightness, and contrast
 - 可预览 Merged 或单独 C1/C2/C3 / Preview Merged or individual C1/C2/C3 channels
+- 支持 time-lapse / 小视频 LIF：界面可用 Frame 滑条、上一帧、下一帧、播放/暂停查看 t001... / Supports time-lapse LIF files with frame slider, previous/next frame, and play/pause preview for t001...
+- time-lapse 导出保留逐帧 TIFF，并额外生成通道和 Merged 的预览 GIF/AVI / Time-lapse export keeps ordered frame TIFFs and also writes preview GIF/AVI movies for channels and merged views
+- 视频速度默认自动：优先参考 LIF 时间戳，否则按帧数估算；也可手动设置 FPS / Movie speed is automatic by default: LIF timestamps first, frame-count estimate otherwise; manual FPS is also available
 - 可选 Merged 合成方式 Max 或 Additive / Choose Max or Additive merge mode
 - 可设置自动调节参数并一键自动调节当前图或全部图 / Configurable auto adjustment for the current image or all images
 - 支持中英双语界面 / Chinese and English UI
@@ -43,10 +47,24 @@ First Launch on macOS
 - 按各图参数导出全部 / Export All With Per-Image Settings: preview and tune each series, then export all with each series' latest saved settings
 
 输出结构 / Output Structure
+提取出的tif/日期/顺序_时间_图名/Raw/C1
+提取出的tif/日期/顺序_时间_图名/Raw/C2
 提取出的tif/日期/顺序_时间_图名/C1
 提取出的tif/日期/顺序_时间_图名/C2
 提取出的tif/日期/顺序_时间_图名/C3
 提取出的tif/日期/顺序_时间_图名/Merged
+
+投稿和复核注意 / Publication and Review Notes
+- Raw 文件夹中的 TIFF 不应用亮度、对比度、Gamma 或颜色映射，适合归档、复核和定量分析。
+- C1、C2... 和 Merged 文件夹中的 TIFF 是显示/排版图，会应用界面中的最新显示参数。
+- time-lapse 的逐帧 TIFF 文件名包含 t001、t002...，可在 Fiji/ImageJ 中作为 image sequence 连续查看。
+- GIF/AVI 是预览动态，方便分享和快速检查；正式分析和投稿原始数据请保留 Raw TIFF 与记录表。
+- 提取记录_*.csv 会记录每个文件的类型、z/t/m index、FPS、FPS 来源、显示参数和输出路径。
+- TIFFs under Raw do not apply brightness, contrast, gamma, or color mapping; use them for archiving, review, and quantitative analysis.
+- TIFFs under C1, C2... and Merged are display/layout images using the latest UI adjustments.
+- Time-lapse frame TIFFs are named with t001, t002... and can be opened as an image sequence in Fiji/ImageJ.
+- GIF/AVI files are preview movies for sharing and quick inspection; keep Raw TIFFs and the manifest for formal analysis and publication records.
+- 提取记录_*.csv records file type, z/t/m index, FPS, FPS source, display parameters, and output path.
 
 安全说明 / Safety Notes
 - 本仓库不包含测试图片、显微图原始数据或导出结果。

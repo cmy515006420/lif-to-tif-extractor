@@ -3,3 +3,5 @@ numpy>=2.0.0
 pillow>=7.2.0
 beautifulsoup4>=4.12.3
 soupsieve>=1.6.1
+imageio>=2.34.0
+imageio-ffmpeg>=0.5.1

@@ -26,9 +26,20 @@ from readlif.reader import LifFile
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+try:
+    import imageio.v2 as imageio
+except Exception:
+    imageio = None
+
+try:
+    import imageio_ffmpeg
+except Exception:
+    imageio_ffmpeg = None
+
 
 FILETIME_EPOCH = datetime(1601, 1, 1, tzinfo=timezone.utc)
 PREVIEW_SIZE = 720
+VIDEO_MAX_SIZE = 1024
 
 LUT_RGB = {
     "red": (1.0, 0.0, 0.0),
@@ -65,12 +76,20 @@ STRINGS = {
         "output": "输出:",
         "preview_area": "预览区",
         "select_preview": "选择左侧图像预览",
+        "frame_controls": "Frame / 时间点",
+        "prev_frame": "上一帧",
+        "next_frame": "下一帧",
+        "play": "播放",
+        "pause": "暂停",
+        "frame_status": "t{current:03d} / {total}",
         "preview_mode": "预览模式:",
         "merge_mode": "Merged 合成:",
         "auto_settings": "自动调节参数",
         "low_percentile": "背景百分位",
         "high_percentile": "信号百分位",
         "target_max": "目标亮度",
+        "auto_video_speed": "自动视频速度",
+        "video_fps": "视频 FPS",
         "merged": "Merged",
         "channel_adjustments": "通道调整",
         "include_merged": "参与 Merged",
@@ -101,7 +120,7 @@ STRINGS = {
         "no_lif_msg": "先打开一个 .lif 文件。",
         "exporting_label": "正在导出{label}...",
         "exporting_progress": "正在导出: {done}/{total}",
-        "export_done_status": "导出完成: {count} 个 TIFF 记录",
+        "export_done_status": "导出完成: {count} 个文件记录",
         "export_done_title": "导出完成",
         "export_done_msg": "已导出到:\n{output}\n\n记录数: {count}\n记录表:\n{manifest}",
         "cancelled_status": "导出已取消",
@@ -138,12 +157,20 @@ STRINGS = {
         "output": "Output:",
         "preview_area": "Preview",
         "select_preview": "Select an image on the left to preview",
+        "frame_controls": "Frame / Time Point",
+        "prev_frame": "Previous",
+        "next_frame": "Next",
+        "play": "Play",
+        "pause": "Pause",
+        "frame_status": "t{current:03d} / {total}",
         "preview_mode": "Preview Mode:",
         "merge_mode": "Merged Mode:",
         "auto_settings": "Auto Adjustment Settings",
         "low_percentile": "Background %",
         "high_percentile": "Signal %",
         "target_max": "Target Max",
+        "auto_video_speed": "Auto video speed",
+        "video_fps": "Video FPS",
         "merged": "Merged",
         "channel_adjustments": "Channel Adjustments",
         "include_merged": "Include in Merged",
@@ -174,7 +201,7 @@ STRINGS = {
         "no_lif_msg": "Open a .lif file first.",
         "exporting_label": "Exporting {label}...",
         "exporting_progress": "Exporting: {done}/{total}",
-        "export_done_status": "Export complete: {count} TIFF records",
+        "export_done_status": "Export complete: {count} file records",
         "export_done_title": "Export Complete",
         "export_done_msg": "Exported to:\n{output}\n\nRecords: {count}\nManifest:\n{manifest}",
         "cancelled_status": "Export cancelled",
@@ -202,6 +229,7 @@ class SeriesRecord:
     channel_luts: tuple[str, ...]
     size_label: str
     dims: tuple[int, int, int, int, int]
+    frame_interval_seconds: float | None
 
 
 class ExportCancelled(Exception):
@@ -226,14 +254,49 @@ def image_elements(lif: LifFile):
     return [e for e in lif.xml_root.iter("Element") if e.find("./Data/Image") is not None]
 
 
-def first_timestamp(element) -> datetime | None:
+def timestamps_for_element(element) -> tuple[datetime, ...]:
     timestamp_list = element.find("./Data/Image/TimeStampList")
     if timestamp_list is None or not timestamp_list.text:
-        return None
+        return ()
+    timestamps = []
     for token in timestamp_list.text.split():
         parsed = parse_filetime_hex(token)
         if parsed is not None:
-            return parsed.astimezone()
+            timestamps.append(parsed.astimezone())
+    return tuple(timestamps)
+
+
+def first_timestamp(element) -> datetime | None:
+    timestamps = timestamps_for_element(element)
+    return timestamps[0] if timestamps else None
+
+
+def infer_frame_interval_seconds(element, frame_count: int) -> float | None:
+    if frame_count <= 1:
+        return None
+    timestamps = timestamps_for_element(element)
+    if len(timestamps) < 2:
+        return None
+
+    group_size = max(1, len(timestamps) // frame_count)
+    frame_starts = []
+    for frame_index in range(frame_count):
+        timestamp_index = frame_index * group_size
+        if timestamp_index < len(timestamps):
+            frame_starts.append(timestamps[timestamp_index])
+
+    deltas = [
+        (b - a).total_seconds()
+        for a, b in zip(frame_starts, frame_starts[1:])
+        if (b - a).total_seconds() > 0
+    ]
+    if deltas:
+        return float(np.median(deltas))
+
+    ordered = sorted(timestamps)
+    duration = (ordered[-1] - ordered[0]).total_seconds()
+    if duration > 0:
+        return duration / max(1, frame_count - 1)
     return None
 
 
@@ -311,6 +374,75 @@ def write_tiff(path: Path, array: np.ndarray) -> None:
     Image.fromarray(array).save(path, format="TIFF", compression="tiff_lzw")
 
 
+def video_frame_from_array(array: np.ndarray) -> Image.Image:
+    image = Image.fromarray(array).convert("RGB")
+    image.thumbnail((VIDEO_MAX_SIZE, VIDEO_MAX_SIZE), Image.Resampling.LANCZOS)
+    return image
+
+
+def write_gif(path: Path, frames: list[Image.Image], duration_ms: int) -> None:
+    if not frames:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    first, *rest = frames
+    first.save(
+        path,
+        format="GIF",
+        save_all=True,
+        append_images=rest,
+        duration=duration_ms,
+        loop=0,
+        optimize=False,
+        disposal=2,
+    )
+
+
+def write_avi(path: Path, frames: list[Image.Image], fps: float) -> bool:
+    if imageio is None or imageio_ffmpeg is None or not frames:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with imageio.get_writer(
+            str(path),
+            fps=max(0.5, float(fps)),
+            codec="mjpeg",
+            quality=9,
+            macro_block_size=None,
+        ) as writer:
+            for frame in frames:
+                writer.append_data(np.asarray(frame.convert("RGB")))
+    except Exception:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def clamp_float(value: float, low: float, high: float) -> float:
+    return max(low, min(high, float(value)))
+
+
+def choose_video_fps(
+    frame_count: int,
+    frame_interval_seconds: float | None,
+    manual_fps: float | None,
+) -> tuple[float, str]:
+    if manual_fps is not None:
+        return clamp_float(manual_fps, 0.5, 60.0), "manual"
+
+    if frame_interval_seconds is not None and frame_interval_seconds > 0:
+        real_fps = 1.0 / frame_interval_seconds
+        if 1.0 <= real_fps <= 20.0:
+            return real_fps, "lif_timestamp"
+        if real_fps < 1.0:
+            return clamp_float(frame_count / 4.0, 0.5, 12.0), "accelerated_from_lif_timestamp"
+        return clamp_float(real_fps, 20.0, 30.0), "capped_from_lif_timestamp"
+
+    return clamp_float(frame_count / 4.0, 2.0, 12.0), "auto_from_frame_count"
+
+
 def requested_dims_for(image, z: int, t: int, m: int) -> dict[int, int]:
     dims = {}
     if image.dims.z > 1:
@@ -333,6 +465,15 @@ def plane_suffix(image, z: int, t: int, m: int) -> str:
     return "_" + "_".join(parts) if parts else ""
 
 
+def video_suffix(image, z: int, m: int) -> str:
+    parts = []
+    if image.dims.z > 1:
+        parts.append(f"z{z + 1:03d}")
+    if image.dims.m > 1:
+        parts.append(f"m{m + 1:03d}")
+    return "_" + "_".join(parts) if parts else ""
+
+
 def iter_planes(image):
     for t in range(int(image.dims.t)):
         for z in range(int(image.dims.z)):
@@ -340,8 +481,9 @@ def iter_planes(image):
                 yield z, t, m
 
 
-def make_preview_plane_array(image, channel: int) -> np.ndarray:
-    plane = image.get_plane(c=channel)
+def make_preview_plane_array(image, channel: int, z: int = 0, t: int = 0, m: int = 0) -> np.ndarray:
+    requested = requested_dims_for(image, z, t, m)
+    plane = image.get_plane(c=channel, requested_dims=requested)
     plane.thumbnail((PREVIEW_SIZE, PREVIEW_SIZE), Image.Resampling.BOX)
     return np.asarray(plane)
 
@@ -379,17 +521,22 @@ def discover_records(lif: LifFile) -> list[SeriesRecord]:
                 channel_luts=channel_luts(element),
                 size_label=size_label,
                 dims=dims,
+                frame_interval_seconds=infer_frame_interval_seconds(element, dims[3]),
             )
         )
     return sorted(records, key=sort_key)
 
 
-def expected_tiff_count(records_with_sequence: Iterable[tuple[int, SeriesRecord]]) -> int:
+def expected_output_count(records_with_sequence: Iterable[tuple[int, SeriesRecord]]) -> int:
     total = 0
     for _sequence, record in records_with_sequence:
         _x, _y, z, t, m = record.dims
         channel_count = max(1, len(record.channel_luts))
-        total += (channel_count + 1) * z * t * m
+        total += ((channel_count * 2) + 1) * z * t * m
+        if t > 1:
+            total += (channel_count + 1) * z * m
+            if imageio is not None and imageio_ffmpeg is not None:
+                total += (channel_count + 1) * z * m
     return total
 
 
@@ -407,6 +554,7 @@ def export_records(
     lut_by_index: dict[int, list[str]],
     apply_adjustments: bool,
     merge_mode: str = "Max",
+    manual_video_fps: float | None = None,
     progress_callback=None,
     cancel_event: threading.Event | None = None,
 ) -> int:
@@ -429,6 +577,14 @@ def export_records(
         time_label = record.acquired_at.strftime("%H%M%S") if record.acquired_at else "unknown"
         datetime_label = record.acquired_at.strftime("%Y%m%d_%H%M%S") if record.acquired_at else "unknown_time"
         series_folder = output_root / date_folder / f"{sequence:03d}_{time_label}_{safe_name(record.name)}"
+        make_timelapse = int(image.dims.t) > 1
+        record_video_fps, video_speed_source = choose_video_fps(
+            int(image.dims.t),
+            record.frame_interval_seconds,
+            manual_video_fps,
+        )
+        frame_duration_ms = max(20, int(round(1000.0 / max(0.1, record_video_fps))))
+        video_frames: dict[tuple[str, int, int], list[Image.Image]] = {}
 
         for z, t, m in iter_planes(image):
             suffix = plane_suffix(image, z, t, m)
@@ -449,6 +605,42 @@ def export_records(
                     include_merged[channel_index] if apply_adjustments and channel_index < len(include_merged) else True
                 )
                 plane = np.asarray(image.get_plane(c=channel_index, requested_dims=requested))
+                channel_name = f"C{channel_index + 1}"
+                raw_filename = f"{datetime_label}_{safe_name(record.name)}-raw-c{channel_index + 1}{suffix}.tif"
+                raw_output_path = series_folder / "Raw" / channel_name / raw_filename
+                write_tiff(raw_output_path, plane)
+                written_count += 1
+                if progress_callback is not None:
+                    progress_callback(written_count)
+                manifest_rows.append(
+                    {
+                        "sequence": f"{sequence:03d}",
+                        "lif_file": str(lif_path),
+                        "lif_index": str(record.lif_index),
+                        "series_name": record.name,
+                        "acquired_at": record.acquired_at.isoformat() if record.acquired_at else "",
+                        "kind": f"Raw {channel_name}",
+                        "file_type": "raw_tiff",
+                        "raw_preserved": "yes",
+                        "display_adjusted": "no",
+                        "z_index": str(z + 1),
+                        "t_index": str(t + 1),
+                        "m_index": str(m + 1),
+                        "video_fps": "",
+                        "video_speed_source": "",
+                        "frame_interval_seconds": (
+                            f"{record.frame_interval_seconds:.6g}" if record.frame_interval_seconds is not None else ""
+                        ),
+                        "lut": original_lut,
+                        "include_merged": "raw",
+                        "black": "none",
+                        "white": "none",
+                        "gamma": "none",
+                        "brightness": "none",
+                        "contrast": "none",
+                        "path": str(raw_output_path),
+                    }
+                )
                 colored = colorize(
                     plane,
                     lut_name,
@@ -462,7 +654,8 @@ def export_records(
                 if channel_include_merged:
                     merged_channels.append(colored)
 
-                channel_name = f"C{channel_index + 1}"
+                if make_timelapse:
+                    video_frames.setdefault((channel_name, z, m), []).append(video_frame_from_array(colored))
                 filename = f"{datetime_label}_{safe_name(record.name)}-c{channel_index + 1}{suffix}.tif"
                 output_path = series_folder / channel_name / filename
                 write_tiff(output_path, colored)
@@ -477,6 +670,17 @@ def export_records(
                         "series_name": record.name,
                         "acquired_at": record.acquired_at.isoformat() if record.acquired_at else "",
                         "kind": channel_name,
+                        "file_type": "display_tiff",
+                        "raw_preserved": "no",
+                        "display_adjusted": "yes" if apply_adjustments else "no",
+                        "z_index": str(z + 1),
+                        "t_index": str(t + 1),
+                        "m_index": str(m + 1),
+                        "video_fps": "",
+                        "video_speed_source": "",
+                        "frame_interval_seconds": (
+                            f"{record.frame_interval_seconds:.6g}" if record.frame_interval_seconds is not None else ""
+                        ),
                         "lut": lut_name,
                         "include_merged": str(channel_include_merged),
                         "black": f"{channel_black:.1f}",
@@ -490,6 +694,8 @@ def export_records(
 
             merged = merge_colored(merged_channels, merge_mode)
             if merged is not None:
+                if make_timelapse:
+                    video_frames.setdefault(("Merged", z, m), []).append(video_frame_from_array(merged))
                 filename = f"{datetime_label}_{safe_name(record.name)}-merged{suffix}.tif"
                 output_path = series_folder / "Merged" / filename
                 write_tiff(output_path, merged)
@@ -504,8 +710,96 @@ def export_records(
                         "series_name": record.name,
                         "acquired_at": record.acquired_at.isoformat() if record.acquired_at else "",
                         "kind": "Merged",
+                        "file_type": "display_tiff",
+                        "raw_preserved": "no",
+                        "display_adjusted": "yes" if apply_adjustments else "no",
+                        "z_index": str(z + 1),
+                        "t_index": str(t + 1),
+                        "m_index": str(m + 1),
+                        "video_fps": "",
+                        "video_speed_source": "",
+                        "frame_interval_seconds": (
+                            f"{record.frame_interval_seconds:.6g}" if record.frame_interval_seconds is not None else ""
+                        ),
                         "lut": "+".join(record.channel_luts),
                         "include_merged": "merged",
+                        "black": "applied" if apply_adjustments else "0.0",
+                        "white": "applied" if apply_adjustments else "255.0",
+                        "gamma": "applied" if apply_adjustments else "1.00",
+                        "brightness": "applied" if apply_adjustments else "1.00",
+                        "contrast": "applied" if apply_adjustments else "1.00",
+                        "path": str(output_path),
+                    }
+                )
+
+        if make_timelapse:
+            for (kind, z, m), frames in video_frames.items():
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ExportCancelled()
+                suffix = video_suffix(image, z, m)
+                kind_slug = kind.lower() if kind != "Merged" else "merged"
+                avi_path = series_folder / kind / f"{datetime_label}_{safe_name(record.name)}-{kind_slug}_timelapse{suffix}.avi"
+                if write_avi(avi_path, frames, record_video_fps):
+                    written_count += 1
+                    if progress_callback is not None:
+                        progress_callback(written_count)
+                    manifest_rows.append(
+                        {
+                            "sequence": f"{sequence:03d}",
+                            "lif_file": str(lif_path),
+                            "lif_index": str(record.lif_index),
+                            "series_name": record.name,
+                            "acquired_at": record.acquired_at.isoformat() if record.acquired_at else "",
+                            "kind": f"{kind} time-lapse AVI",
+                            "file_type": "preview_avi",
+                            "raw_preserved": "no",
+                            "display_adjusted": "yes" if apply_adjustments else "no",
+                            "z_index": str(z + 1),
+                            "t_index": "all",
+                            "m_index": str(m + 1),
+                            "video_fps": f"{record_video_fps:.2f}",
+                            "video_speed_source": video_speed_source,
+                            "frame_interval_seconds": (
+                                f"{record.frame_interval_seconds:.6g}" if record.frame_interval_seconds is not None else ""
+                            ),
+                            "lut": "+".join(lut_values) if kind == "Merged" else "",
+                            "include_merged": "video",
+                            "black": "applied" if apply_adjustments else "0.0",
+                            "white": "applied" if apply_adjustments else "255.0",
+                            "gamma": "applied" if apply_adjustments else "1.00",
+                            "brightness": "applied" if apply_adjustments else "1.00",
+                            "contrast": "applied" if apply_adjustments else "1.00",
+                            "path": str(avi_path),
+                        }
+                    )
+
+                filename = f"{datetime_label}_{safe_name(record.name)}-{kind_slug}_timelapse{suffix}.gif"
+                output_path = series_folder / kind / filename
+                write_gif(output_path, frames, frame_duration_ms)
+                written_count += 1
+                if progress_callback is not None:
+                    progress_callback(written_count)
+                manifest_rows.append(
+                    {
+                        "sequence": f"{sequence:03d}",
+                        "lif_file": str(lif_path),
+                        "lif_index": str(record.lif_index),
+                        "series_name": record.name,
+                        "acquired_at": record.acquired_at.isoformat() if record.acquired_at else "",
+                        "kind": f"{kind} time-lapse GIF",
+                        "file_type": "preview_gif",
+                        "raw_preserved": "no",
+                        "display_adjusted": "yes" if apply_adjustments else "no",
+                        "z_index": str(z + 1),
+                        "t_index": "all",
+                        "m_index": str(m + 1),
+                        "video_fps": f"{record_video_fps:.2f}",
+                        "video_speed_source": video_speed_source,
+                        "frame_interval_seconds": (
+                            f"{record.frame_interval_seconds:.6g}" if record.frame_interval_seconds is not None else ""
+                        ),
+                        "lut": "+".join(lut_values) if kind == "Merged" else "",
+                        "include_merged": "video",
                         "black": "applied" if apply_adjustments else "0.0",
                         "white": "applied" if apply_adjustments else "255.0",
                         "gamma": "applied" if apply_adjustments else "1.00",
@@ -525,6 +819,15 @@ def export_records(
                 "series_name",
                 "acquired_at",
                 "kind",
+                "file_type",
+                "raw_preserved",
+                "display_adjusted",
+                "z_index",
+                "t_index",
+                "m_index",
+                "video_fps",
+                "video_speed_source",
+                "frame_interval_seconds",
                 "lut",
                 "include_merged",
                 "black",
@@ -551,6 +854,8 @@ class LifToTifApp:
         self.auto_low_var = tk.DoubleVar(value=0.5)
         self.auto_high_var = tk.DoubleVar(value=99.8)
         self.auto_target_var = tk.DoubleVar(value=230.0)
+        self.auto_video_speed_var = tk.BooleanVar(value=True)
+        self.video_fps_var = tk.DoubleVar(value=5.0)
         self.root.title(self.t("app_title"))
         self.root.geometry("1600x950")
         self.root.minsize(1450, 800)
@@ -560,6 +865,10 @@ class LifToTifApp:
         self.records: list[SeriesRecord] = []
         self.current_record: SeriesRecord | None = None
         self.current_planes: list[np.ndarray] = []
+        self.current_frame_index = 0
+        self.playing = False
+        self.play_after_id: str | None = None
+        self.updating_frame_controls = False
         self.brightness_by_index: dict[int, list[float]] = {}
         self.contrast_by_index: dict[int, list[float]] = {}
         self.gamma_by_index: dict[int, list[float]] = {}
@@ -575,6 +884,8 @@ class LifToTifApp:
         self.output_var = tk.StringVar(value=str((APP_DIR / "提取出的tif").resolve()))
         self.status_var = tk.StringVar(value=self.t("status_start"))
         self.path_var = tk.StringVar(value=self.t("no_lif"))
+        self.frame_var = tk.IntVar(value=1)
+        self.frame_label_var = tk.StringVar(value="")
         self.apply_brightness_var = tk.BooleanVar(value=True)
         self.include_merged_vars: list[tk.BooleanVar] = []
         self.lut_vars: list[tk.StringVar] = []
@@ -586,6 +897,10 @@ class LifToTifApp:
         self.slider_frame: ttk.Frame | None = None
         self.slider_canvas: tk.Canvas | None = None
         self.preview_wrap: ttk.Frame | None = None
+        self.frame_controls: ttk.LabelFrame | None = None
+        self.frame_scale: tk.Scale | None = None
+        self.play_button: ttk.Button | None = None
+        self.preview_mode_row: ttk.Frame | None = None
 
         self.build_ui()
         self.root.after(150, self.poll_worker_queue)
@@ -683,7 +998,29 @@ class LifToTifApp:
         self.info_var = tk.StringVar(value="")
         ttk.Label(controls_wrap, textvariable=self.info_var).pack(fill=tk.X, pady=(0, 6))
 
+        self.frame_controls = ttk.LabelFrame(controls_wrap, text=self.t("frame_controls"), padding=(8, 4))
+        frame_button_row = ttk.Frame(self.frame_controls)
+        frame_button_row.pack(fill=tk.X)
+        ttk.Button(frame_button_row, text=self.t("prev_frame"), command=self.previous_frame).pack(side=tk.LEFT)
+        self.play_button = ttk.Button(frame_button_row, text=self.t("play"), command=self.toggle_playback)
+        self.play_button.pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(frame_button_row, text=self.t("next_frame"), command=self.next_frame).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(frame_button_row, textvariable=self.frame_label_var, anchor=tk.E).pack(side=tk.RIGHT)
+        self.frame_scale = tk.Scale(
+            self.frame_controls,
+            from_=1,
+            to=1,
+            resolution=1,
+            orient=tk.HORIZONTAL,
+            variable=self.frame_var,
+            showvalue=False,
+            length=240,
+            command=self.on_frame_slider_changed,
+        )
+        self.frame_scale.pack(fill=tk.X, pady=(4, 0))
+
         preview_mode_row = ttk.Frame(controls_wrap)
+        self.preview_mode_row = preview_mode_row
         preview_mode_row.pack(fill=tk.X, pady=(0, 6))
         ttk.Label(preview_mode_row, text=self.t("preview_mode")).grid(row=0, column=0, sticky=tk.W, padx=(0, 6), pady=2)
         self.preview_mode_combo = ttk.Combobox(
@@ -708,22 +1045,28 @@ class LifToTifApp:
 
         auto_box = ttk.LabelFrame(controls_wrap, text=self.t("auto_settings"), padding=(8, 4))
         auto_box.pack(fill=tk.X, pady=(0, 6))
-        for row_index, (label_key, var, width) in enumerate((
-            ("low_percentile", self.auto_low_var, 6),
-            ("high_percentile", self.auto_high_var, 6),
-            ("target_max", self.auto_target_var, 6),
+        for row_index, (label_key, var, width, min_value, max_value, increment) in enumerate((
+            ("low_percentile", self.auto_low_var, 6, 0.0, 100.0, 0.1),
+            ("high_percentile", self.auto_high_var, 6, 0.0, 100.0, 0.1),
+            ("target_max", self.auto_target_var, 6, 0.0, 255.0, 0.1),
+            ("video_fps", self.video_fps_var, 6, 0.5, 60.0, 0.5),
         )):
             ttk.Label(auto_box, text=self.t(label_key)).grid(row=row_index, column=0, sticky=tk.W, padx=(0, 6), pady=2)
             ttk.Spinbox(
                 auto_box,
-                from_=0.0,
-                to=255.0 if label_key == "target_max" else 100.0,
-                increment=0.1,
+                from_=min_value,
+                to=max_value,
+                increment=increment,
                 textvariable=var,
                 width=width,
             ).grid(
                 row=row_index, column=1, sticky=tk.W, pady=2
             )
+        ttk.Checkbutton(
+            auto_box,
+            text=self.t("auto_video_speed"),
+            variable=self.auto_video_speed_var,
+        ).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(2, 0))
 
         slider_area = ttk.Frame(controls_wrap)
         slider_area.pack(fill=tk.BOTH, expand=True)
@@ -761,9 +1104,11 @@ class LifToTifApp:
                 self.update_info_text()
         elif self.current_record is None:
             self.preview_label.configure(text=self.t("preview_area"))
+        self.update_frame_controls()
 
     def on_language_changed(self, _event=None) -> None:
         self.language = "en" if self.lang_var.get() == "English" else "zh"
+        self.stop_playback()
         current_status = self.status_var.get()
         for child in self.root.winfo_children():
             child.destroy()
@@ -774,6 +1119,7 @@ class LifToTifApp:
         self.build_ui()
 
     def open_lif(self) -> None:
+        self.stop_playback()
         initial = str(APP_DIR)
         if self.lif_path is not None:
             initial = str(self.lif_path.parent)
@@ -801,6 +1147,9 @@ class LifToTifApp:
         self.records = records
         self.current_record = None
         self.current_planes = []
+        self.current_frame_index = 0
+        self.frame_var.set(1)
+        self.frame_label_var.set("")
         self.brightness_by_index.clear()
         self.contrast_by_index.clear()
         self.gamma_by_index.clear()
@@ -814,6 +1163,7 @@ class LifToTifApp:
         self.clear_sliders()
         self.preview_mode_var.set("Merged")
         self.preview_label.configure(image="", text=self.t("select_preview"))
+        self.update_frame_controls()
         self.info_var.set(self.t("series_loaded", count=len(records)))
         self.clear_busy(self.t("read_done", count=len(records)))
 
@@ -846,13 +1196,16 @@ class LifToTifApp:
 
     def load_record(self, record: SeriesRecord) -> None:
         assert self.lif is not None
+        self.stop_playback()
         self.set_busy(self.t("loading_preview"))
         self.root.update_idletasks()
         try:
             image = self.lif.get_image(record.lif_index)
-            self.current_planes = [self.make_preview_plane(image, c) for c in range(image.channels)]
             self.current_record = record
+            self.current_frame_index = 0
+            self.current_planes = [self.make_preview_plane(image, c, t=0) for c in range(image.channels)]
             self.ensure_channel_settings(record, image.channels)
+            self.update_frame_controls()
             self.update_preview_modes()
             self.build_sliders(record, image.channels)
             self.render_preview()
@@ -862,8 +1215,146 @@ class LifToTifApp:
             self.clear_busy()
             messagebox.showerror(self.t("preview_failed_title"), self.t("preview_failed", error=exc))
 
-    def make_preview_plane(self, image, channel: int) -> np.ndarray:
-        return make_preview_plane_array(image, channel)
+    def make_preview_plane(self, image, channel: int, z: int = 0, t: int = 0, m: int = 0) -> np.ndarray:
+        return make_preview_plane_array(image, channel, z=z, t=t, m=m)
+
+    def current_frame_count(self) -> int:
+        if self.current_record is None:
+            return 1
+        return max(1, int(self.current_record.dims[3]))
+
+    def update_frame_controls(self) -> None:
+        if self.frame_controls is None or self.frame_scale is None:
+            return
+        total = self.current_frame_count()
+        if total <= 1:
+            self.stop_playback()
+            self.frame_label_var.set("")
+            try:
+                self.frame_controls.pack_forget()
+            except tk.TclError:
+                pass
+            return
+
+        try:
+            self.frame_controls.pack_info()
+        except tk.TclError:
+            if self.preview_mode_row is not None:
+                self.frame_controls.pack(fill=tk.X, pady=(0, 6), before=self.preview_mode_row)
+            else:
+                self.frame_controls.pack(fill=tk.X, pady=(0, 6))
+        self.updating_frame_controls = True
+        try:
+            self.frame_scale.configure(from_=1, to=total)
+            self.frame_var.set(self.current_frame_index + 1)
+            self.update_frame_label()
+        finally:
+            self.updating_frame_controls = False
+        if self.play_button is not None:
+            self.play_button.configure(text=self.t("pause") if self.playing else self.t("play"))
+
+    def update_frame_label(self) -> None:
+        total = self.current_frame_count()
+        current = max(1, min(total, self.current_frame_index + 1))
+        self.frame_label_var.set(self.t("frame_status", current=current, total=total))
+
+    def on_frame_slider_changed(self, value: str) -> None:
+        if self.updating_frame_controls:
+            return
+        if self.current_record is None or self.current_frame_count() <= 1:
+            return
+        try:
+            frame_number = int(round(float(value)))
+        except ValueError:
+            return
+        self.show_frame(frame_number - 1)
+
+    def load_current_frame_planes(self) -> None:
+        if self.lif is None or self.current_record is None:
+            return
+        image = self.lif.get_image(self.current_record.lif_index)
+        frame_index = max(0, min(self.current_frame_count() - 1, self.current_frame_index))
+        self.current_planes = [self.make_preview_plane(image, c, t=frame_index) for c in range(image.channels)]
+
+    def show_frame(self, frame_index: int) -> None:
+        if self.current_record is None:
+            return
+        total = self.current_frame_count()
+        frame_index = max(0, min(total - 1, int(frame_index)))
+        if frame_index == self.current_frame_index and self.current_planes:
+            self.update_frame_controls()
+            return
+        self.current_frame_index = frame_index
+        try:
+            self.load_current_frame_planes()
+            self.update_frame_controls()
+            self.render_preview()
+        except Exception as exc:
+            self.stop_playback()
+            messagebox.showerror(self.t("preview_failed_title"), self.t("preview_failed", error=exc))
+
+    def previous_frame(self) -> None:
+        total = self.current_frame_count()
+        if total <= 1:
+            return
+        self.show_frame((self.current_frame_index - 1) % total)
+
+    def next_frame(self) -> None:
+        total = self.current_frame_count()
+        if total <= 1:
+            return
+        self.show_frame((self.current_frame_index + 1) % total)
+
+    def manual_video_fps(self) -> float | None:
+        if bool(self.auto_video_speed_var.get()):
+            return None
+        try:
+            return float(self.video_fps_var.get())
+        except (tk.TclError, ValueError):
+            return 5.0
+
+    def current_playback_fps(self) -> float:
+        if self.current_record is None:
+            return 2.0
+        fps, _source = choose_video_fps(
+            self.current_frame_count(),
+            self.current_record.frame_interval_seconds,
+            self.manual_video_fps(),
+        )
+        return fps
+
+    def toggle_playback(self) -> None:
+        if self.playing:
+            self.stop_playback()
+            return
+        if self.current_frame_count() <= 1:
+            return
+        self.playing = True
+        self.update_frame_controls()
+        self.schedule_next_play_frame()
+
+    def schedule_next_play_frame(self) -> None:
+        if self.playing:
+            delay_ms = max(20, int(round(1000.0 / max(0.1, self.current_playback_fps()))))
+            self.play_after_id = self.root.after(delay_ms, self.play_next_frame)
+
+    def play_next_frame(self) -> None:
+        self.play_after_id = None
+        if not self.playing:
+            return
+        self.next_frame()
+        self.schedule_next_play_frame()
+
+    def stop_playback(self) -> None:
+        if self.play_after_id is not None:
+            try:
+                self.root.after_cancel(self.play_after_id)
+            except tk.TclError:
+                pass
+            self.play_after_id = None
+        self.playing = False
+        if self.play_button is not None:
+            self.play_button.configure(text=self.t("play"))
 
     def ensure_channel_settings(self, record: SeriesRecord, channels: int) -> None:
         def extend_float(mapping: dict[int, list[float]], default: float) -> None:
@@ -893,7 +1384,8 @@ class LifToTifApp:
         if self.current_record is None:
             values = ("Merged",)
         else:
-            values = ("Merged",) + tuple(f"C{i + 1}" for i in range(len(self.current_record.channel_luts)))
+            channel_count = max(len(self.current_record.channel_luts), len(self.current_planes))
+            values = ("Merged",) + tuple(f"C{i + 1}" for i in range(channel_count))
         if hasattr(self, "preview_mode_combo"):
             self.preview_mode_combo.configure(values=values)
         if self.preview_mode_var.get() not in values:
@@ -1326,8 +1818,9 @@ class LifToTifApp:
         adjustment_maps = self.export_adjustment_maps(
             records_with_sequence, use_current_adjustments
         )
-        self.export_total = expected_tiff_count(records_with_sequence)
+        self.export_total = expected_output_count(records_with_sequence)
         self.export_cancel_event = threading.Event()
+        manual_video_fps = self.manual_video_fps()
 
         self.set_exporting(self.t("exporting_label", label=label), self.export_total)
         thread = threading.Thread(
@@ -1340,6 +1833,7 @@ class LifToTifApp:
                 *adjustment_maps,
                 apply_adjustments,
                 self.merge_mode_var.get(),
+                manual_video_fps,
                 self.export_cancel_event,
             ),
             daemon=True,
@@ -1429,6 +1923,7 @@ class LifToTifApp:
         lut_by_index: dict[int, list[str]],
         apply_adjustments: bool,
         merge_mode: str,
+        manual_video_fps: float | None,
         cancel_event: threading.Event,
     ) -> None:
         try:
@@ -1449,6 +1944,7 @@ class LifToTifApp:
                 lut_by_index,
                 apply_adjustments,
                 merge_mode,
+                manual_video_fps,
                 progress_callback=progress_callback,
                 cancel_event=cancel_event,
             )
